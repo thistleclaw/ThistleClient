@@ -1,0 +1,22 @@
+[Desktop Entry]
+Name=ThistleClient
+Comment=Ultra-lightweight Sing-box VPN Client & System Tray Indicator
+Exec=/home/th157leclaw/.local/bin/thistle-client --gui
+Icon=/home/th157leclaw/.local/share/thistle-client/icons/thistle-logo.svg
+Terminal=false
+Type=Application
+Categories=Network;VPN;Security;GTK;
+StartupNotify=true
+Actions=Connect;Disconnect;Tray;
+
+[Desktop Action Connect]
+Name=Включить VPN
+Exec=/home/th157leclaw/.local/bin/thistle-client --connect
+
+[Desktop Action Disconnect]
+Name=Отключить VPN
+Exec=/home/th157leclaw/.local/bin/thistle-client --disconnect
+
+[Desktop Action Tray]
+Name=Запустить индикатор трея
+Exec=/home/th157leclaw/.local/bin/thistle-client

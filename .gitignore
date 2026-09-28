@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+*.pid
+.DS_Store
+.idea/
+.vscode/
+data/
+*.log
+*.pid
+data/*
+!data/.gitkeep
+settings.json
+
