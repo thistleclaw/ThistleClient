@@ -72,8 +72,7 @@ def generate_singbox_config(outbounds: list, active_tag: str = "", enable_tun: b
             "type": "mixed",
             "tag": "mixed-in",
             "listen": "127.0.0.1",
-            "listen_port": mixed_port,
-            "sniff": True
+            "listen_port": mixed_port
         }
     ]
 
@@ -88,8 +87,7 @@ def generate_singbox_config(outbounds: list, active_tag: str = "", enable_tun: b
             "strict_route": strict_route,
             "iproute2_table_index": table_idx,
             "iproute2_rule_index": rule_idx,
-            "stack": net_stack,
-            "sniff": True
+            "stack": net_stack
         })
 
     # Collect all VPN server endpoints to ensure direct routing and local DNS bootstrap
@@ -179,10 +177,6 @@ def generate_singbox_config(outbounds: list, active_tag: str = "", enable_tun: b
         {
             "type": "direct",
             "tag": "direct"
-        },
-        {
-            "type": "block",
-            "tag": "block"
         }
     ] + native_outbounds
 

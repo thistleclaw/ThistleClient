@@ -1,14 +1,13 @@
 [Unit]
 Description=ThistleClient System Tray Indicator
-After=graphical-session.target network.target
+After=graphical-session.target network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/home/th157leclaw/.local/bin/thistle-client
+ExecStart=%h/.local/bin/thistle-client
 Restart=on-failure
 RestartSec=3s
-Environment=DISPLAY=:0
-Environment=PYTHONPATH=/home/th157leclaw/.local/share/thistle-client
 
 [Install]
 WantedBy=default.target

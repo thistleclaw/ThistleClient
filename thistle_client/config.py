@@ -7,6 +7,7 @@ Manages persistent user preferences, network tuning, and Sing-box parameters.
 import json
 import os
 import copy
+import tempfile
 
 BASE_DIR = os.path.expanduser("~/.local/share/thistle-client")
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -17,6 +18,37 @@ SINGBOX_CONFIG_FILE = os.path.join(DATA_DIR, "singbox_config.json")
 SINGBOX_LOG_FILE = os.path.join(DATA_DIR, "singbox.log")
 SINGBOX_PID_FILE = os.path.join(DATA_DIR, "singbox.pid")
 XRAY_SOCKS_PORT = 20850
+
+
+def _ensure_private_dir(path: str) -> None:
+    """Create a directory and keep it private to the current user."""
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+
+
+def write_json_private(path: str, data, *, indent: int = 2) -> None:
+    """Atomically write credential-bearing JSON with mode 0600."""
+    directory = os.path.dirname(path) or "."
+    _ensure_private_dir(directory)
+    fd, tmp_path = tempfile.mkstemp(prefix=".thistle-", suffix=".tmp", dir=directory, text=True)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=indent)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+        os.chmod(path, 0o600)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
 
 DEFAULT_SETTINGS = {
     "ping": {
@@ -64,8 +96,14 @@ DEFAULT_SETTINGS = {
 
 class SettingsManager:
     def __init__(self):
-        os.makedirs(CONFIG_DIR, exist_ok=True)
-        os.makedirs(DATA_DIR, exist_ok=True)
+        _ensure_private_dir(CONFIG_DIR)
+        _ensure_private_dir(DATA_DIR)
+        for sensitive_file in (SETTINGS_FILE, SUBS_FILE, SINGBOX_CONFIG_FILE):
+            try:
+                if os.path.isfile(sensitive_file):
+                    os.chmod(sensitive_file, 0o600)
+            except OSError:
+                pass
         self.settings = copy.deepcopy(DEFAULT_SETTINGS)
         self.load()
 
@@ -80,8 +118,7 @@ class SettingsManager:
 
     def save(self):
         try:
-            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.settings, f, ensure_ascii=False, indent=2)
+            write_json_private(SETTINGS_FILE, self.settings)
         except Exception as e:
             print(f"[SettingsManager] Error saving settings: {e}")
 

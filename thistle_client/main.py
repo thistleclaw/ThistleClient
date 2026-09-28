@@ -25,7 +25,7 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import GLib, Gtk
 
 from thistle_client.config import (
-    settings, SUBS_FILE, SINGBOX_CONFIG_FILE, DATA_DIR
+    settings, SUBS_FILE, SINGBOX_CONFIG_FILE, DATA_DIR, write_json_private
 )
 from thistle_client.config_generator import generate_singbox_config
 from thistle_client.core_manager import CoreManager
@@ -88,8 +88,7 @@ class ThistleTrayApp:
 
     def save_data(self):
         try:
-            with open(SUBS_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, ensure_ascii=False, indent=2)
+            write_json_private(SUBS_FILE, self.data)
         except Exception as e:
             print(f"Failed to save data: {e}")
 
@@ -124,8 +123,7 @@ class ThistleTrayApp:
         nodes = self.get_current_nodes()
         active_node = self.data.get("active_node", "")
         cfg = generate_singbox_config(nodes, active_tag=active_node, enable_tun=enable_tun)
-        with open(SINGBOX_CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        write_json_private(SINGBOX_CONFIG_FILE, cfg)
 
         if restart and self.core.is_running():
             active_dict = self.get_active_node_dict()
@@ -403,7 +401,8 @@ class ThistleTrayApp:
             self.data["active_node"] = nodes[0].get("tag", "")
         self.save_data()
         self.delays = {}
-        self.sync_config(enable_tun=True)
+        was_running = self.core.is_running()
+        self.sync_config(enable_tun=True, restart=was_running)
         self.update_icon_state()
         self.build_menu()
         if self.manager_window and self.manager_window.is_visible():
@@ -420,7 +419,8 @@ class ThistleTrayApp:
         mixed_port = int(settings.get("network", "mixed_port", 2080))
         self.clash_api = ClashAPI(port=clash_port)
         self.pinger = MultiModePinger(mixed_port=mixed_port, clash_port=clash_port)
-        self.sync_config(enable_tun=self.core.is_running())
+        was_running = self.core.is_running()
+        self.sync_config(enable_tun=was_running, restart=was_running)
         self.update_icon_state()
         self.build_menu()
         if self.manager_window and self.manager_window.is_visible():
@@ -473,7 +473,8 @@ class ThistleTrayApp:
                         self.data["active_sub"] = name
                         self.data["active_node"] = nodes[0].get("tag", "")
                         self.save_data()
-                        self.sync_config(enable_tun=True)
+                        was_running = self.core.is_running()
+                        self.sync_config(enable_tun=True, restart=was_running)
                         self.update_icon_state()
                         self.build_menu()
                         self.notify("ThistleClient", f"Подписка '{name}' добавлена! Найдено серверов: {len(nodes)}")
@@ -497,7 +498,8 @@ class ThistleTrayApp:
                     sub_data["nodes"] = nodes
                     sub_data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
                     self.save_data()
-                    GLib.idle_add(self.sync_config, True)
+                    was_running = self.core.is_running()
+                    GLib.idle_add(self.sync_config, True, was_running)
                     GLib.idle_add(self.update_icon_state)
                     GLib.idle_add(self.build_menu)
                     GLib.idle_add(self.notify, "ThistleClient", f"Подписка '{sub_name}' обновлена ({len(nodes)} серв.)")
@@ -513,6 +515,7 @@ class ThistleTrayApp:
         if not sub_name or sub_name not in self.data.get("subs", {}):
             return
 
+        was_running = self.core.is_running()
         del self.data["subs"][sub_name]
         remaining = list(self.data["subs"].keys())
         if remaining:
@@ -524,7 +527,12 @@ class ThistleTrayApp:
             self.data["active_node"] = ""
 
         self.save_data()
-        self.sync_config(enable_tun=True)
+        if remaining:
+            self.sync_config(enable_tun=True, restart=was_running)
+        else:
+            if was_running:
+                self.core.stop()
+            self.sync_config(enable_tun=False)
         self.update_icon_state()
         self.build_menu()
         self.notify("ThistleClient", f"Подписка '{sub_name}' удалена")

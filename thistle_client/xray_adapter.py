@@ -8,12 +8,13 @@ SplitHTTP (xhttp), gRPC, and Vision protocols.
 import json
 import os
 import signal
+import shutil
 import socket
 import subprocess
 import time
 import urllib.parse
 
-from thistle_client.config import DATA_DIR, XRAY_SOCKS_PORT
+from thistle_client.config import DATA_DIR, XRAY_SOCKS_PORT, write_json_private
 
 XRAY_BINARY = "/usr/local/bin/xray"
 XRAY_CONFIG_FILE = os.path.join(DATA_DIR, "xray_config.json")
@@ -197,8 +198,8 @@ def node_to_xray_outbound(node: dict) -> dict:
 
 
 class XrayManager:
-    def __init__(self, binary_path: str = XRAY_BINARY):
-        self.binary_path = binary_path
+    def __init__(self, binary_path: str = None):
+        self.binary_path = binary_path or shutil.which("xray") or XRAY_BINARY
         self.pid_file = XRAY_PID_FILE
         self.log_file = XRAY_LOG_FILE
         self.config_file = XRAY_CONFIG_FILE
@@ -280,9 +281,8 @@ class XrayManager:
             ]
         }
 
-        os.makedirs(os.path.dirname(self.config_file), exist_ok=True)
-        with open(self.config_file, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2)
+        os.makedirs(os.path.dirname(self.config_file), mode=0o700, exist_ok=True)
+        write_json_private(self.config_file, config)
 
         try:
             log_fd = open(self.log_file, "a")

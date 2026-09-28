@@ -88,7 +88,7 @@
 ### 1. Системные зависимости (Ubuntu / Debian / Linux Mint)
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-gi python3-gi-cairo gir1.2-gtk-3.0 curl iproute2
+sudo apt install -y python3 python3-gi python3-gi-cairo gir1.2-gtk-3.0 curl iproute2 libcap2-bin
 ```
 
 > [!NOTE]
@@ -96,9 +96,16 @@ sudo apt install -y python3 python3-gi python3-gi-cairo gir1.2-gtk-3.0 curl ipro
 > - Sing-box: `/usr/local/bin/sing-box` (или в `$PATH`)
 > - Xray-core: `/usr/local/bin/xray` (или в `$PATH`)
 
+> [!IMPORTANT]
+> ThistleClient запускает TUN из пользовательского `systemd --user` сервиса. Для `auto_route` бинарнику sing-box нужен `CAP_NET_ADMIN` (и `CAP_NET_RAW` для сетевых операций):
+> ```bash
+> sudo setcap cap_net_admin,cap_net_raw+ep "$(readlink -f "$(command -v sing-box)")"
+> ```
+> После обновления sing-box file capabilities могут сброситься; установщик проверяет это и выводит предупреждение.
+
 ### 2. Установка ThistleClient
 ```bash
-git clone https://github.com/th157leclaw/ThistleClient.git
+git clone https://github.com/thistleclaw/ThistleClient.git
 cd ThistleClient
 chmod +x install.sh
 ./install.sh
@@ -134,7 +141,7 @@ thistle-client --gui
 
 ## 🧪 Тестирование
 
-Проект покрыт автоматическим набором из 25 юнит-тестов (парсеры VLESS/Hy2, изоляция портов, трансляция Xray, проверка маршрутизации и отсутствие утечек процессов):
+Проект покрыт автоматическим набором из 30 юнит-тестов (парсеры VLESS/Hy2, изоляция портов, трансляция Xray, проверка маршрутизации и отсутствие утечек процессов):
 
 ```bash
 python3 -m unittest discover tests
@@ -208,17 +215,24 @@ Most popular Linux proxy and VPN clients (Happ, v2rayA, Nekoray) rely on heavy r
 ### 1. Install System Dependencies (Ubuntu / Debian / Mint)
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-gi python3-gi-cairo gir1.2-gtk-3.0 curl iproute2
+sudo apt install -y python3 python3-gi python3-gi-cairo gir1.2-gtk-3.0 curl iproute2 libcap2-bin
 ```
 
 > [!NOTE]
 > Ensure the following core binaries are available in your `$PATH` or `/usr/local/bin`:
-> - Sing-box: `/usr/local/bin/sing-box`
-> - Xray-core: `/usr/local/bin/xray`
+> - Sing-box: `/usr/local/bin/sing-box` (or in `$PATH`)
+> - Xray-core: `/usr/local/bin/xray` (or in `$PATH`)
+
+> [!IMPORTANT]
+> ThistleClient starts its TUN from a `systemd --user` service. With `auto_route`, the sing-box binary needs `CAP_NET_ADMIN` (and `CAP_NET_RAW` for network operations):
+> ```bash
+> sudo setcap cap_net_admin,cap_net_raw+ep "$(readlink -f "$(command -v sing-box)")"
+> ```
+> File capabilities may be cleared when sing-box is upgraded; the installer checks this and prints a warning.
 
 ### 2. Install ThistleClient
 ```bash
-git clone https://github.com/th157leclaw/ThistleClient.git
+git clone https://github.com/thistleclaw/ThistleClient.git
 cd ThistleClient
 chmod +x install.sh
 ./install.sh
@@ -254,7 +268,7 @@ thistle-client --gui
 
 ## 🧪 Testing
 
-The test suite contains 25 automated unit tests verifying VLESS/Hy2 parsers, Xray outbound translation, dynamic port isolation, routing checks, and leak-free process management:
+The test suite contains 30 automated unit tests verifying VLESS/Hy2 parsers, Xray outbound translation, dynamic port isolation, routing checks, and leak-free process management:
 
 ```bash
 python3 -m unittest discover tests
@@ -275,7 +289,7 @@ ThistleClient/
 ├── LICENSE                   # MIT License
 ├── README.md                 # Bilingual documentation
 ├── tests/                    # Unit test suite
-│   └── test_thistle.py       # 25 automated tests
+│   └── test_thistle.py       # 30 automated tests
 ├── thistle_client/           # Application package
 │   ├── config.py             # Settings manager
 │   ├── pinger.py             # Isolated Proxy-GET engine

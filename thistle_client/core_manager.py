@@ -9,6 +9,7 @@ import json
 import os
 import re
 import signal
+import shutil
 import subprocess
 import time
 from thistle_client.config import SINGBOX_CONFIG_FILE, SINGBOX_LOG_FILE, SINGBOX_PID_FILE, XRAY_SOCKS_PORT
@@ -129,8 +130,8 @@ def check_conflicting_vpns() -> str:
 
 
 class CoreManager:
-    def __init__(self, binary_path: str = "/usr/local/bin/sing-box", config_path: str = SINGBOX_CONFIG_FILE):
-        self.binary_path = binary_path
+    def __init__(self, binary_path: str = None, config_path: str = SINGBOX_CONFIG_FILE):
+        self.binary_path = binary_path or shutil.which("sing-box") or "/usr/local/bin/sing-box"
         self.config_path = config_path
         self.pid_file = SINGBOX_PID_FILE
         self.log_file = SINGBOX_LOG_FILE
@@ -176,28 +177,30 @@ class CoreManager:
 
         # If node requires Xray (Reality, XHTTP), start Xray
         if node_to_use and is_xray_node(node_to_use):
-            self.xray.start(node_to_use, listen_port=XRAY_SOCKS_PORT)
+            if not self.xray.start(node_to_use, listen_port=XRAY_SOCKS_PORT):
+                print("[CoreManager] Refusing to start TUN because Xray backend failed to start.")
+                return False
         else:
             self.xray.stop()
 
         try:
             log_fd = open(self.log_file, "a")
-            env = os.environ.copy()
-            env["ENABLE_DEPRECATED_SPECIAL_OUTBOUNDS"] = "true"
-
             self.process = subprocess.Popen(
                 [self.binary_path, "run", "-c", self.config_path],
                 stdout=log_fd,
                 stderr=log_fd,
-                env=env,
                 preexec_fn=os.setsid
             )
             with open(self.pid_file, "w") as f:
                 f.write(str(self.process.pid))
 
             time.sleep(1)
-            return self.is_running()
+            running = self.is_running()
+            if not running:
+                self.xray.stop()
+            return running
         except Exception as e:
+            self.xray.stop()
             print(f"[CoreManager] Failed to start sing-box: {e}")
             return False
 

@@ -714,5 +714,75 @@ class TestCloseToTrayAndSettings(unittest.TestCase):
         self.assertEqual(requests, [("GET", "/socks-latency-check")])
 
 
+class TestSecurityAndPortability(unittest.TestCase):
+    def test_subscription_fetch_keeps_tls_verification_enabled(self):
+        import ssl
+        from unittest.mock import MagicMock, patch
+        from thistle_client.subscription_parser import fetch_subscription
+
+        class FakeContext:
+            def __init__(self):
+                self.check_hostname = True
+                self.verify_mode = ssl.CERT_REQUIRED
+
+        context = FakeContext()
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = (
+            b"vless://a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d@example.com:443"
+            b"?security=tls#TLS-Test"
+        )
+        with patch(
+            "thistle_client.subscription_parser.ssl.create_default_context",
+            return_value=context,
+        ), patch(
+            "thistle_client.subscription_parser.urllib.request.urlopen",
+            return_value=response,
+        ) as urlopen:
+            nodes = fetch_subscription("https://example.com/subscription")
+
+        self.assertTrue(context.check_hostname)
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertEqual(len(nodes), 1)
+        self.assertIs(urlopen.call_args.kwargs["context"], context)
+
+    def test_private_json_writer_uses_mode_0600(self):
+        import os
+        import stat
+        import tempfile
+        from thistle_client.config import write_json_private
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "credentials.json")
+            write_json_private(path, {"password": "secret"})
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+
+    def test_systemd_unit_is_user_portable(self):
+        from pathlib import Path
+
+        service = (
+            Path(__file__).resolve().parents[1] / "thistle-client.service"
+        ).read_text(encoding="utf-8")
+        self.assertIn("ExecStart=%h/.local/bin/thistle-client", service)
+        self.assertNotIn("/home/th157leclaw", service)
+        self.assertNotIn("Environment=DISPLAY=:0", service)
+
+    def test_generated_config_has_no_removed_legacy_fields(self):
+        cfg = generate_singbox_config([], enable_tun=True)
+        self.assertFalse(any("sniff" in inbound for inbound in cfg["inbounds"]))
+        self.assertFalse(any(outbound.get("type") == "block" for outbound in cfg["outbounds"]))
+        self.assertTrue(any(rule.get("action") == "sniff" for rule in cfg["route"]["rules"]))
+
+    def test_core_binaries_can_be_resolved_from_path(self):
+        from unittest.mock import patch
+        from thistle_client.core_manager import CoreManager
+        from thistle_client.xray_adapter import XrayManager
+
+        with patch("thistle_client.core_manager.shutil.which", return_value="/opt/bin/sing-box"):
+            self.assertEqual(CoreManager().binary_path, "/opt/bin/sing-box")
+        with patch("thistle_client.xray_adapter.shutil.which", return_value="/opt/bin/xray"):
+            self.assertEqual(XrayManager().binary_path, "/opt/bin/xray")
+
+
 if __name__ == "__main__":
     unittest.main()

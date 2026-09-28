@@ -293,9 +293,10 @@ def fetch_subscription(url: str) -> list:
         url,
         headers={"User-Agent": "sing-box/1.12.12 ClashforWindows/0.20.39 ThistleClient/1.0"}
     )
+    # Keep the platform CA store and hostname verification enabled. Subscription
+    # URLs contain credentials and proxy endpoints, so accepting an invalid
+    # certificate would allow a network attacker to replace the feed.
     ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
 
     with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
         content = resp.read().decode("utf-8", errors="ignore")
