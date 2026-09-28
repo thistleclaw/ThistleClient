@@ -214,6 +214,8 @@ class CoreManager:
             if not self.is_running():
                 return self.start(node)
             switched = self.xray.start(node, listen_port=XRAY_SOCKS_PORT)
+            if not switched:
+                return False
             try:
                 from thistle_client.clash_api import ClashAPI
                 from thistle_client.config import settings
@@ -233,8 +235,7 @@ class CoreManager:
                     return True
             except Exception:
                 pass
-            self.restart(node)
-            return True
+            return self.restart(node)
 
     def stop(self) -> bool:
         """Terminates running processes gracefully."""

@@ -323,12 +323,21 @@ class ThistleTrayApp:
     def on_select_server(self, widget, tag: str):
         if not widget.get_active():
             return
+        previous_tag = self.data.get("active_node", "")
         self.data["active_node"] = tag
         self.save_data()
 
         node = self.get_active_node_dict()
         if self.core.is_running():
-            self.core.switch_node(node)
+            if not self.core.switch_node(node):
+                self.data["active_node"] = previous_tag
+                self.save_data()
+                self.notify("ThistleClient", f"Не удалось переключиться на сервер: {tag}")
+                self.update_icon_state()
+                self.build_menu()
+                if self.manager_window and self.manager_window.is_visible():
+                    self.manager_window.refresh_all()
+                return
             self.sync_config(enable_tun=True)
             self.notify("ThistleClient", f"Сервер переключен: {tag}")
         self.update_icon_state()
