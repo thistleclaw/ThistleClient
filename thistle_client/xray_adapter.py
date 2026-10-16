@@ -7,7 +7,6 @@ SplitHTTP (xhttp), gRPC, and Vision protocols.
 
 import json
 import os
-import socket
 import shutil
 import subprocess
 import time
@@ -15,6 +14,7 @@ import urllib.parse
 
 from thistle_client.config import DATA_DIR, XRAY_SOCKS_PORT
 from thistle_client.storage import write_json
+from thistle_client.secure_dns import resolve_endpoint
 
 XRAY_BINARY = "/usr/local/bin/xray"
 XRAY_CONFIG_FILE = os.path.join(DATA_DIR, "xray_config.json")
@@ -200,6 +200,14 @@ def node_to_xray_outbound(node: dict) -> dict:
 from thistle_client.process_lifecycle import matches_process, managed_pids, stop_processes
 
 
+def pin_outbound_endpoint(outbound, hostname, **kwargs):
+    entries = outbound.get("settings", {}).get("vnext", outbound.get("settings", {}).get("servers", []))
+    if entries:
+        address = resolve_endpoint(hostname, **kwargs)
+        for entry in entries:
+            entry["address"] = address
+
+
 class XrayManager:
     def __init__(self, binary_path: str = None):
         self.binary_path = binary_path or shutil.which("xray") or XRAY_BINARY
@@ -218,36 +226,23 @@ class XrayManager:
     def start(self, node: dict, listen_port: int = XRAY_SOCKS_PORT) -> bool:
         """Starts Xray routing outbound traffic for the specified node."""
         self.last_error = ""
-        if not self.stop():
-            return False
-
         outbound = node_to_xray_outbound(node)
         if not outbound:
             self.last_error = "Неподдерживаемая конфигурация Xray."
             return False
 
-        hosts = {
-            "dns.google": "8.8.8.8",
-            "cloudflare-dns.com": "1.1.1.1"
-        }
-        srv = node.get("server", "").strip()
-        if srv:
-            try:
-                ip = socket.gethostbyname(srv)
-                hosts[srv] = ip
-            except Exception:
-                pass
+        try:
+            # Keep the working backend alive while resolving a replacement endpoint.
+            pin_outbound_endpoint(outbound, node.get("server", "").strip())
+        except Exception as exc:
+            self.last_error = str(exc)
+            return False
+        if not self.stop():
+            return False
 
         config = {
             "log": {
                 "loglevel": "warning"
-            },
-            "dns": {
-                "hosts": hosts,
-                "servers": [
-                    "8.8.8.8",
-                    "1.1.1.1"
-                ]
             },
             "inbounds": [
                 {

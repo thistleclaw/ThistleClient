@@ -22,7 +22,8 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from thistle_client.xray_adapter import node_to_xray_outbound, is_xray_node
+from thistle_client.xray_adapter import node_to_xray_outbound, is_xray_node, pin_outbound_endpoint
+from thistle_client.secure_dns import dns_server, resolve_endpoint
 
 _active_test_procs = set()
 _process_lock = threading.Lock()
@@ -124,14 +125,11 @@ class MultiModePinger:
         """Measures TCP SYN-ACK connection latency directly to server port."""
         if not host or not port:
             return -1
-        t0 = time.perf_counter()
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(timeout)
-            sock.connect((host, int(port)))
-            ms = round((time.perf_counter() - t0) * 1000)
-            sock.close()
-            return max(1, ms)
+            address = resolve_endpoint(host, timeout=min(timeout, 5))
+            t0 = time.perf_counter()
+            with socket.create_connection((address, int(port)), timeout=timeout):
+                return max(1, round((time.perf_counter() - t0) * 1000))
         except Exception:
             return -1
 
@@ -140,8 +138,9 @@ class MultiModePinger:
         if not host:
             return -1
         try:
+            address = resolve_endpoint(host, timeout=min(timeout, 5))
             res = subprocess.run(
-                ["ping", "-c", "1", "-W", str(timeout), host],
+                ["ping", "-c", "1", "-W", str(timeout), address],
                 capture_output=True,
                 text=True,
                 timeout=timeout + 1
@@ -314,7 +313,10 @@ class MultiModePinger:
                 rules = []
                 for i, (orig_idx, n) in enumerate(xray_nodes):
                     in_tag = f"in_{i}"
+                    if cancel_event.is_set():
+                        return results
                     out_ob = node_to_xray_outbound(n)
+                    pin_outbound_endpoint(out_ob, n.get("server", ""), timeout=1, cancel_event=cancel_event)
                     # Apply SNI reality fix if speedtest.net without www
                     sec = out_ob.get("streamSettings", {}).get("realitySettings", {})
                     if sec.get("serverName", "").lower() == "speedtest.net":
@@ -388,18 +390,15 @@ class MultiModePinger:
                 sb_cfg = {
                     "log": {"level": "error"},
                     "dns": {
-                        "servers": [{
-                            "tag": "dns-direct",
-                            "type": "udp",
-                            "server": "8.8.8.8",
-                        }],
+                        "servers": [dns_server("dns-bootstrap", bootstrap=True)],
+                        "final": "dns-bootstrap",
                     },
                     "inbounds": sb_inbounds,
                     "outbounds": sb_outbounds + [{"type": "direct", "tag": "direct"}],
                     "route": {
                         "rules": sb_rules,
                         "final": "direct",
-                        "default_domain_resolver": "dns-direct",
+                        "default_domain_resolver": "dns-bootstrap",
                     }
                 }
                 singbox_config = write_config(sb_cfg)

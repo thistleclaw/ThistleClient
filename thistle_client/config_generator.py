@@ -5,10 +5,9 @@ Generates compliant sing-box 1.12+ JSON incorporating all user settings and para
 """
 
 import ipaddress
-import json
-import socket
 from thistle_client.config import settings, XRAY_SOCKS_PORT
 from thistle_client.xray_adapter import is_xray_node
+from thistle_client.secure_dns import dns_server
 
 
 def generate_singbox_config(outbounds: list, active_tag: str = "", enable_tun: bool = True) -> dict:
@@ -23,11 +22,9 @@ def generate_singbox_config(outbounds: list, active_tag: str = "", enable_tun: b
     mixed_port = int(settings.get("network", "mixed_port", 2080))
     clash_port = int(settings.get("network", "clash_port", 9095))
 
-    dns_remote_server = settings.get("dns", "remote_server", "8.8.8.8")
-    dns_remote_type = settings.get("dns", "remote_type", "https")
     dns_strategy = settings.get("dns", "strategy", "prefer_ipv4")
     dns_cache = bool(settings.get("dns", "independent_cache", True))
-    hijack_dns = bool(settings.get("dns", "hijack_dns", True))
+    hijack_dns = True  # Enforced: system DNS must not bypass the protected resolver.
 
     bypass_private = bool(settings.get("routing", "bypass_private", True))
     auto_detect_iface = bool(settings.get("routing", "auto_detect_interface", True))
@@ -81,7 +78,7 @@ def generate_singbox_config(outbounds: list, active_tag: str = "", enable_tun: b
             "type": "tun",
             "tag": "tun-in",
             "interface_name": iface_name,
-            "address": ["172.19.0.1/30"],
+            "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
             "mtu": mtu,
             "auto_route": auto_route,
             "strict_route": strict_route,
@@ -101,11 +98,6 @@ def generate_singbox_config(outbounds: list, active_tag: str = "", enable_tun: b
                 server_ips_cidr.add(f"{ip}/32" if ip.version == 4 else f"{ip}/128")
             except ValueError:
                 server_domains.add(srv)
-                try:
-                    resolved_ip = socket.gethostbyname(srv)
-                    server_ips_cidr.add(f"{resolved_ip}/32")
-                except Exception:
-                    pass
 
     # Build policy routing rules
     route_rules = [
@@ -120,17 +112,6 @@ def generate_singbox_config(outbounds: list, active_tag: str = "", enable_tun: b
         }
     ]
 
-    if server_ips_cidr:
-        route_rules.append({
-            "ip_cidr": sorted(list(server_ips_cidr)),
-            "outbound": "direct"
-        })
-    if server_domains:
-        route_rules.append({
-            "domain": sorted(list(server_domains)),
-            "outbound": "direct"
-        })
-
     if hijack_dns:
         route_rules.append({
             "action": "sniff"
@@ -143,18 +124,30 @@ def generate_singbox_config(outbounds: list, active_tag: str = "", enable_tun: b
             "port": [53],
             "action": "hijack-dns"
         })
+
+    if server_ips_cidr:
+        route_rules.append({
+            "ip_cidr": sorted(list(server_ips_cidr)),
+            "outbound": "direct"
+        })
+    if server_domains:
+        route_rules.append({
+            "domain": sorted(list(server_domains)),
+            "outbound": "direct"
+        })
+
     if bypass_private:
         route_rules.append({
             "ip_is_private": True,
             "outbound": "direct"
         })
 
-    # DNS rules: VPN server domains must be resolved directly through direct UDP DNS
+    # Only VPN endpoint names may use the separate encrypted bootstrap resolver.
     dns_rules = []
     if server_domains:
         dns_rules.append({
             "domain": sorted(list(server_domains)),
-            "server": "dns-direct"
+            "server": "dns-bootstrap"
         })
 
     # Always provide Xray SOCKS bridge for Reality/XHTTP nodes
@@ -180,27 +173,14 @@ def generate_singbox_config(outbounds: list, active_tag: str = "", enable_tun: b
         }
     ] + native_outbounds
 
-    dns_server = str(dns_remote_server or "8.8.8.8").strip()
-    try:
-        ipaddress.ip_address(dns_server)
-    except ValueError:
-        # A hostname here could require resolving through itself while the TUN
-        # is active. Keep the bootstrap resolver numeric to prevent recursion.
-        dns_server = "8.8.8.8"
     config = {
         "log": {
             "level": log_level,
             "timestamp": True
         },
         "dns": {
-            "servers": [
-                {
-                    "tag": "dns-direct",
-                    "type": "udp",
-                    "server": dns_server,
-                    "server_port": 53,
-                }
-            ],
+            "servers": [dns_server("dns-remote"), dns_server("dns-bootstrap", bootstrap=True)],
+            "final": "dns-remote",
             "rules": dns_rules,
             "strategy": dns_strategy,
             "independent_cache": dns_cache
@@ -208,7 +188,7 @@ def generate_singbox_config(outbounds: list, active_tag: str = "", enable_tun: b
         "inbounds": inbounds,
         "outbounds": final_outbounds,
         "route": {
-            "default_domain_resolver": "dns-direct",
+            "default_domain_resolver": "dns-bootstrap",
             "rules": route_rules,
             "auto_detect_interface": auto_detect_iface,
             "final": "PROXY"

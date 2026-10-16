@@ -12,6 +12,7 @@ from gi.repository import Gtk, Pango
 
 from thistle_client.ui_helpers import button_icon, menu_item, icon_label, copy_subscription_url
 from thistle_client.config import settings, SINGBOX_LOG_FILE
+from thistle_client.secure_dns import dns_server, TLS_NAMES
 
 
 class SettingsDialog(Gtk.Dialog):
@@ -191,14 +192,24 @@ class SettingsDialog(Gtk.Dialog):
         vbox.set_border_width(12)
         scrolled.add(vbox)
 
-        grp_dns = self._create_group("DNS сервер (UDP)")
+        grp_dns = self._create_group("DNS приложений — через VPN")
         self.combo_dns_server = Gtk.ComboBoxText.new_with_entry()
-        self.combo_dns_server.append("8.8.8.8", "Google DNS (8.8.8.8)")
-        self.combo_dns_server.append("1.1.1.1", "Cloudflare DNS (1.1.1.1)")
-        self.combo_dns_server.append("94.140.14.14", "AdGuard DNS (94.140.14.14)")
-        self.combo_dns_server.append("9.9.9.9", "Quad9 DNS (9.9.9.9)")
+        self.combo_dns_server.append("8.8.8.8", "8.8.8.8")
+        self.combo_dns_server.append("1.1.1.1", "1.1.1.1")
+        self.combo_dns_server.append("94.140.14.14", "94.140.14.14")
+        self.combo_dns_server.append("9.9.9.9", "9.9.9.9")
         grp_dns.pack_start(self._create_row("DNS сервер:", self.combo_dns_server,
-                                            "Прямой UDP DNS по IP-адресу; DNS-запросы приложений перехватываются sing-box."), False, False, 0)
+                                            "IP резолвера. DoH/DoT передаётся через выбранный VPN-сервер, без открытого DNS."), False, False, 0)
+
+        self.combo_dns_transport = Gtk.ComboBoxText()
+        self.combo_dns_transport.append("https", "DNS over HTTPS (DoH)")
+        self.combo_dns_transport.append("tls", "DNS over TLS (DoT)")
+        grp_dns.pack_start(self._create_row("Протокол:", self.combo_dns_transport), False, False, 0)
+        self.entry_dns_tls = Gtk.Entry()
+        self.entry_dns_path = Gtk.Entry()
+        grp_dns.pack_start(self._create_row("Имя сертификата TLS:", self.entry_dns_tls), False, False, 0)
+        grp_dns.pack_start(self._create_row("Путь DoH:", self.entry_dns_path), False, False, 0)
+        self.combo_dns_server.connect("changed", lambda combo: self.entry_dns_tls.set_text(TLS_NAMES.get(combo.get_child().get_text().strip(), "")))
 
         self.combo_strategy = Gtk.ComboBoxText()
         self.combo_strategy.append("prefer_ipv4", "Предпочитать IPv4 (prefer_ipv4)")
@@ -206,13 +217,26 @@ class SettingsDialog(Gtk.Dialog):
         self.combo_strategy.append("ipv4_only", "Только IPv4 (ipv4_only)")
         grp_dns.pack_start(self._create_row("Стратегия резолвинга адресов:", self.combo_strategy), False, False, 0)
 
-        self.chk_hijack_dns = Gtk.CheckButton(label="Перехватывать системные DNS запросы (Hijack DNS)")
+        self.chk_hijack_dns = Gtk.CheckButton(label="Перехват системного DNS включён")
+        self.chk_hijack_dns.set_sensitive(False)
         grp_dns.pack_start(self.chk_hijack_dns, False, False, 0)
 
         self.chk_dns_cache = Gtk.CheckButton(label="Независимый кэш DNS (Independent Cache)")
         grp_dns.pack_start(self.chk_dns_cache, False, False, 0)
 
         vbox.pack_start(grp_dns, False, False, 0)
+        bootstrap = self._create_group("Начальный DoH — только адрес VPN-сервера")
+        self.entry_bootstrap_ip = Gtk.Entry()
+        self.entry_bootstrap_tls = Gtk.Entry()
+        self.entry_bootstrap_path = Gtk.Entry()
+        bootstrap.pack_start(self._create_row("IP резолвера:", self.entry_bootstrap_ip), False, False, 0)
+        bootstrap.pack_start(self._create_row("Имя сертификата TLS:", self.entry_bootstrap_tls), False, False, 0)
+        bootstrap.pack_start(self._create_row("Путь DoH:", self.entry_bootstrap_path), False, False, 0)
+        note = Gtk.Label(label="Используется до подключения VPN для его адреса. Если DoH заблокирован, нужен узел с IP-адресом или свежий кэш. Отката на открытый DNS нет.", xalign=0)
+        note.set_line_wrap(True)
+        note.set_max_width_chars(65)
+        bootstrap.pack_start(note, False, False, 0)
+        vbox.pack_start(bootstrap, False, False, 0)
         return scrolled
 
     # --- Page 4: Routing ---
@@ -333,8 +357,15 @@ class SettingsDialog(Gtk.Dialog):
         entry_dns_server = self.combo_dns_server.get_child()
         if entry_dns_server:
             entry_dns_server.set_text(settings.get("dns", "remote_server", "8.8.8.8"))
+        transport = settings.get("dns", "remote_type", "https")
+        self.combo_dns_transport.set_active_id(transport if transport in ("https", "tls") else "https")
+        self.entry_dns_tls.set_text(settings.get("dns", "remote_tls_name", "") or TLS_NAMES.get(settings.get("dns", "remote_server", "8.8.8.8"), ""))
+        self.entry_dns_path.set_text(settings.get("dns", "remote_path", "/dns-query"))
+        self.entry_bootstrap_ip.set_text(settings.get("dns", "bootstrap_server", "1.1.1.1"))
+        self.entry_bootstrap_tls.set_text(settings.get("dns", "bootstrap_tls_name", "cloudflare-dns.com"))
+        self.entry_bootstrap_path.set_text(settings.get("dns", "bootstrap_path", "/dns-query"))
         self.combo_strategy.set_active_id(settings.get("dns", "strategy", "prefer_ipv4"))
-        self.chk_hijack_dns.set_active(bool(settings.get("dns", "hijack_dns", True)))
+        self.chk_hijack_dns.set_active(True)
         self.chk_dns_cache.set_active(bool(settings.get("dns", "independent_cache", True)))
 
         # Routing
@@ -351,6 +382,23 @@ class SettingsDialog(Gtk.Dialog):
         self.combo_log_level.set_active_id(settings.get("app", "log_level", "warn"))
 
     def save_values(self):
+        dns = {
+            "remote_server": self.combo_dns_server.get_child().get_text().strip(),
+            "remote_type": self.combo_dns_transport.get_active_id() or "https",
+            "remote_tls_name": self.entry_dns_tls.get_text().strip(),
+            "remote_path": self.entry_dns_path.get_text().strip(),
+            "bootstrap_server": self.entry_bootstrap_ip.get_text().strip(),
+            "bootstrap_tls_name": self.entry_bootstrap_tls.get_text().strip(),
+            "bootstrap_path": self.entry_bootstrap_path.get_text().strip(),
+        }
+        try:
+            dns_server("dns-remote", preferences=dns)
+            dns_server("dns-bootstrap", bootstrap=True, preferences=dns)
+        except ValueError as exc:
+            self._show_error(str(exc))
+            return False
+        for key, value in dns.items():
+            settings.set("dns", key, value)
         settings.set("subscriptions", "auto_update", self.chk_auto_update.get_active())
         settings.set("subscriptions", "interval_hours", int(self.spin_update_interval.get_value()))
         # Ping
@@ -378,7 +426,7 @@ class SettingsDialog(Gtk.Dialog):
         if entry_dns_server:
             settings.set("dns", "remote_server", entry_dns_server.get_text().strip() or "8.8.8.8")
         settings.set("dns", "strategy", self.combo_strategy.get_active_id() or "prefer_ipv4")
-        settings.set("dns", "hijack_dns", self.chk_hijack_dns.get_active())
+        settings.set("dns", "hijack_dns", True)
         settings.set("dns", "independent_cache", self.chk_dns_cache.get_active())
 
         # Routing
@@ -397,6 +445,7 @@ class SettingsDialog(Gtk.Dialog):
         settings.save()
         if self.on_saved_callback:
             self.on_saved_callback()
+        return True
 
     def on_view_logs_clicked(self, widget):
         log_dialog = Gtk.Dialog(title="Журнал Sing-box", parent=self, flags=0)

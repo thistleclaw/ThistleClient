@@ -484,8 +484,9 @@ class ThistleTrayApp:
 
     def on_open_settings(self, widget):
         dlg = SettingsDialog(on_saved_callback=self.on_settings_saved)
-        if dlg.run() == Gtk.ResponseType.OK:
-            dlg.save_values()
+        while dlg.run() == Gtk.ResponseType.OK:
+            if dlg.save_values() is not False:
+                break
         dlg.destroy()
 
     def on_settings_saved(self):

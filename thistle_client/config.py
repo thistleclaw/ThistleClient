@@ -56,8 +56,13 @@ DEFAULT_SETTINGS = {
     },
     "dns": {
         "remote_server": "8.8.8.8",
-        "remote_type": "udp",
-        "domain_resolver": "dns-direct",
+        "remote_type": "https",
+        "domain_resolver": "dns-bootstrap",
+        "remote_tls_name": "",
+        "remote_path": "/dns-query",
+        "bootstrap_server": "1.1.1.1",
+        "bootstrap_tls_name": "cloudflare-dns.com",
+        "bootstrap_path": "/dns-query",
         "strategy": "prefer_ipv4",
         "independent_cache": True,
         "hijack_dns": True
@@ -100,6 +105,17 @@ class SettingsManager:
                     self._deep_update(self.settings, data)
             except Exception as e:
                 print(f"[SettingsManager] Error reading settings: {e}")
+
+        # Migrate installed plaintext preferences to the protected DNS path.
+        dns = self.settings.get("dns", {})
+        changed = False
+        for key, value in (("hijack_dns", True), ("domain_resolver", "dns-bootstrap")):
+            if dns.get(key) != value:
+                dns[key], changed = value, True
+        if dns.get("remote_type") in ("udp", "tcp"):
+            dns["remote_type"], changed = "https", True
+        if changed:
+            self.save()
 
     def save(self):
         try:

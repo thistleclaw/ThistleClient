@@ -185,7 +185,7 @@ class TestConfigGenerator(unittest.TestCase):
         # Check domain rule exists in dns.rules
         dns_domains = []
         for r in cfg["dns"]["rules"]:
-            if "domain" in r and r.get("server") == "dns-direct":
+            if "domain" in r and r.get("server") == "dns-bootstrap":
                 dns_domains.extend(r["domain"])
         self.assertIn("example.com", dns_domains)
 
@@ -201,8 +201,9 @@ class TestConfigGenerator(unittest.TestCase):
             return original_get(section, key, default)
 
         with patch.object(settings, "get", side_effect=get_setting):
-            cfg = generate_singbox_config([], enable_tun=False)
-        self.assertEqual(cfg["dns"]["servers"][0]["server"], "8.8.8.8")
+            with self.assertRaisesRegex(ValueError, "IP"):
+                generate_singbox_config([], enable_tun=False)
+
 
 
 class TestCloseToTrayAndSettings(unittest.TestCase):
@@ -264,11 +265,14 @@ class TestCloseToTrayAndSettings(unittest.TestCase):
         self.assertFalse(_is_managed_singbox_process(os.getpid()))
         self.assertFalse(XrayManager()._is_managed_process(os.getpid()))
 
-        # 2. Verify dns-direct is UDP to 8.8.8.8 without detour
-        dns_direct = [s for s in cfg["dns"]["servers"] if s.get("tag") == "dns-direct"][0]
-        self.assertEqual(dns_direct.get("type"), "udp")
-        self.assertEqual(dns_direct.get("server"), "8.8.8.8")
-        self.assertNotIn("detour", dns_direct)
+        # 2. Ordinary DNS is encrypted through PROXY, endpoint bootstrap is separate.
+        remote = next(server for server in cfg["dns"]["servers"] if server["tag"] == "dns-remote")
+        bootstrap = next(server for server in cfg["dns"]["servers"] if server["tag"] == "dns-bootstrap")
+        self.assertEqual(remote["type"], "https")
+        self.assertEqual(remote["detour"], "PROXY")
+        self.assertEqual(bootstrap["type"], "https")
+        self.assertNotIn("detour", bootstrap)
+        self.assertEqual(cfg["dns"]["final"], "dns-remote")
 
         # 3. Validate with sing-box check and dry-run initialization
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
@@ -351,7 +355,7 @@ class TestCloseToTrayAndSettings(unittest.TestCase):
             {"type": "vless", "tag": "XHTTP", "server": "xray.example", "server_port": 443,
              "uuid": "uuid", "_raw_query": {"security": "reality", "type": "xhttp", "sni": "xray.example"}},
         ]
-        with patch("thistle_client.config_generator.socket.gethostbyname", side_effect=OSError):
+        with patch("socket.gethostbyname", side_effect=AssertionError("OS DNS forbidden")):
             cfg = generate_singbox_config(nodes, active_tag="XHTTP", enable_tun=True)
 
         tun = next(inbound for inbound in cfg["inbounds"] if inbound["type"] == "tun")
@@ -359,7 +363,7 @@ class TestCloseToTrayAndSettings(unittest.TestCase):
         self.assertEqual(tun["iproute2_table_index"], 2024)
         self.assertEqual(tun["iproute2_rule_index"], 9100)
         self.assertEqual(cfg["dns"]["servers"][0]["server"], "8.8.8.8")
-        self.assertNotIn("detour", cfg["dns"]["servers"][0])
+        self.assertEqual(cfg["dns"]["servers"][0]["detour"], "PROXY")
         self.assertIn(
             {"protocol": "dns", "action": "hijack-dns"},
             cfg["route"]["rules"],
