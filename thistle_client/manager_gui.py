@@ -15,6 +15,7 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import GLib, Gtk, Pango, GdkPixbuf
 
 from thistle_client.storage import write_json, normalize_selection
+from thistle_client.country_flags import country_presentation, country_badge, dark_badge
 from thistle_client.ui_helpers import button_icon, menu_item, icon_label, copy_subscription_url
 from thistle_client.config import (
     settings, SUBS_FILE, SINGBOX_CONFIG_FILE, SINGBOX_LOG_FILE, DATA_DIR
@@ -155,7 +156,12 @@ class ThistleManagerWindow(Gtk.Window):
         self.lbl_status.set_markup("<b>Статус:</b> Определение...")
 
         status_vbox.pack_start(self.lbl_title, False, False, 0)
-        status_vbox.pack_start(self.lbl_status, False, False, 0)
+        status_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.status_country = Gtk.Image()
+        self.status_country.set_no_show_all(True)
+        status_row.pack_start(self.status_country, False, False, 0)
+        status_row.pack_start(self.lbl_status, True, True, 0)
+        status_vbox.pack_start(status_row, False, False, 0)
         header_box.pack_start(status_vbox, True, True, 0)
 
         # Action Buttons
@@ -230,10 +236,18 @@ class ThistleManagerWindow(Gtk.Window):
         scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroll.set_shadow_type(Gtk.ShadowType.IN)
 
-        # Model: [DisplayTag, Proto, Host, DelayMarkup, RawDelay, RawTag]
-        self.model_servers = Gtk.ListStore(str, str, str, str, int, str)
+        # Keep the first six columns stable: display, protocol, endpoint, delay, sort delay, raw tag.
+        # Country artwork and tooltips are presentation only.
+        self.model_servers = Gtk.ListStore(str, str, str, str, int, str, GdkPixbuf.Pixbuf, str, str)
         self.tree_servers = Gtk.TreeView(model=self.model_servers)
         self.tree_servers.connect("row-activated", self.on_server_row_activated)
+        self.tree_servers.set_tooltip_column(7)
+
+        flag_renderer = Gtk.CellRendererPixbuf()
+        flag_renderer.set_property("ypad", 3)
+        col_country = Gtk.TreeViewColumn("Страна", flag_renderer, pixbuf=6)
+        col_country.set_sort_column_id(8)
+        col_country.set_min_width(70)
 
         col_tag = Gtk.TreeViewColumn("Имя сервера", Gtk.CellRendererText(), text=0)
         col_tag.set_sort_column_id(0)
@@ -251,6 +265,7 @@ class ThistleManagerWindow(Gtk.Window):
         col_ping.set_sort_column_id(4)
         col_ping.set_resizable(True)
 
+        self.tree_servers.append_column(col_country)
         self.tree_servers.append_column(col_tag)
         self.tree_servers.append_column(col_type)
         self.tree_servers.append_column(col_host)
@@ -273,6 +288,9 @@ class ThistleManagerWindow(Gtk.Window):
     def update_status_ui(self):
         is_running = self.core.is_running()
         active_node = self.data.get("active_node") or "Не выбран"
+        code, active_node = country_presentation(self.get_active_node_dict() or active_node)
+        self.status_country.set_from_pixbuf(country_badge(code, dark_badge(self)))
+        self.status_country.set_visible(bool(code) and is_running)
         has_nodes = bool(self.get_current_nodes())
 
         if is_running:
@@ -352,8 +370,11 @@ class ThistleManagerWindow(Gtk.Window):
             delay = self.delays.get(tag, None)
             delay_markup, delay_val = self.format_delay(delay)
 
-            display_tag = f"● {tag}" if tag == active else f"  {tag}"
-            self.model_servers.append([display_tag, proto, host, delay_markup, delay_val, tag])
+            code, name = country_presentation(node)
+            display_tag = f"● {name}" if tag == active else f"  {name}"
+            tooltip = f"{code}: {name}" if code else name
+            self.model_servers.append([display_tag, proto, host, delay_markup, delay_val, tag,
+                                       country_badge(code, dark_badge(self)), tooltip, code])
 
     def on_timer_tick(self) -> bool:
         if self.is_visible():

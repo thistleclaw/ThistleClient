@@ -26,6 +26,7 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import GLib, Gtk
 
 from thistle_client.storage import write_json, normalize_selection
+from thistle_client.country_flags import country_presentation, server_menu_content
 from thistle_client.ui_helpers import button_icon, menu_item, icon_label, copy_subscription_url
 from thistle_client.config import (
     settings, SUBS_FILE, SINGBOX_CONFIG_FILE, DATA_DIR
@@ -117,7 +118,10 @@ class ThistleTrayApp:
 
     def update_icon_state(self):
         is_running = self.core.is_running()
-        active_node = self.data.get("active_node") or "Не выбран"
+        raw_active = self.data.get("active_node") or "Не выбран"
+        country, active_node = country_presentation(raw_active)
+        if country:
+            active_node = f"[{country}] {active_node}"
         icon_file = ICON_ACTIVE if is_running else ICON_INACTIVE
         tooltip = f"ThistleClient: Подключено ({active_node})" if is_running else "ThistleClient: Отключено"
 
@@ -155,7 +159,10 @@ class ThistleTrayApp:
             self.menu.remove(child)
 
         is_running = self.core.is_running()
-        active_node = self.data.get("active_node") or "Не выбран"
+        raw_active = self.data.get("active_node") or "Не выбран"
+        country, active_node = country_presentation(raw_active)
+        if country:
+            active_node = f"[{country}] {active_node}"
         active_sub = self.data.get("active_sub") or "Нет"
         nodes = self.get_current_nodes()
 
@@ -189,11 +196,12 @@ class ThistleTrayApp:
             for node in nodes:
                 tag = node.get("tag", "Без имени")
                 delay = self.delays.get(tag, None)
-                label = f"{tag} ({delay} ms)" if delay and delay > 0 else tag
+                suffix = f" ({delay} ms)" if delay and delay > 0 else ""
                 if delay == -1:
-                    label = f"{tag} (недоступен)"
+                    suffix = " (недоступен)"
 
-                item = Gtk.RadioMenuItem(group=server_group, label=label)
+                item = Gtk.RadioMenuItem(group=server_group)
+                item.add(server_menu_content(node, suffix, self.menu))
                 if server_group is None:
                     server_group = item
 

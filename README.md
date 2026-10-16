@@ -26,9 +26,9 @@
 <a name="-русская-версия"></a>
 # 🇷🇺 Русская версия
 
-## Обновление 1.0.4
+## Обновление 1.0.5
 
-Исправлен оставшийся обход защищённого DNS во временном Xray при проверке пинга.
+Цветные ярлычки стран с флагом и кодом отображаются в списке серверов, строке подключения и трее. Флаги встроены в клиент и работают без emoji-шрифта и загрузок из сети.
 
 Защищённый DNS через VPN, отдельный начальный DoH для адреса VPN-сервера и отсутствие отката на открытый DNS. Настройки находятся во вкладке «DNS». Если начальный DoH заблокирован, для первого подключения нужен VPN-узел с IP-адресом или ещё действующий кэш адреса. Подробности — в [истории изменений](CHANGELOG.md).
 
@@ -147,7 +147,7 @@ thistle-client --gui
 
 ## 🧪 Тестирование
 
-Проект покрыт автоматическим набором из 73 тестов (парсеры VLESS/Hy2, изоляция портов, трансляция Xray, проверка маршрутизации и отсутствие утечек процессов, повторные подключения, восстановление без PID-файла и защиту от нескольких экземпляров):
+Проект покрыт автоматическим набором из 79 тестов (парсеры VLESS/Hy2, изоляция портов, трансляция Xray, проверка маршрутизации и отсутствие утечек процессов, повторные подключения, восстановление без PID-файла и защиту от нескольких экземпляров):
 
 ```bash
 python3 -m unittest discover tests
@@ -274,7 +274,7 @@ thistle-client --gui
 
 ## 🧪 Testing
 
-The test suite contains 73 automated tests verifying VLESS/Hy2 parsers, Xray outbound translation, dynamic port isolation, routing checks, and leak-free process management:
+The test suite contains 79 automated tests verifying VLESS/Hy2 parsers, Xray outbound translation, dynamic port isolation, routing checks, and leak-free process management:
 
 ```bash
 python3 -m unittest discover tests
@@ -319,3 +319,6 @@ ThistleClient/
 ## 📄 License
 
 Released under the permissive [MIT License](LICENSE).
+
+
+Country flag artwork: [flag-icons](https://github.com/lipis/flag-icons), MIT license. Bundled license and pinned source revision: [icons/flags](icons/flags).
