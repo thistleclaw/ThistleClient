@@ -7,7 +7,7 @@ Manages persistent user preferences, network tuning, and Sing-box parameters.
 import json
 import os
 import copy
-import tempfile
+from thistle_client.storage import write_json
 
 BASE_DIR = os.path.expanduser("~/.local/share/thistle-client")
 DATA_DIR = os.path.join(BASE_DIR, "data")
@@ -31,23 +31,7 @@ def _ensure_private_dir(path: str) -> None:
 
 def write_json_private(path: str, data, *, indent: int = 2) -> None:
     """Atomically write credential-bearing JSON with mode 0600."""
-    directory = os.path.dirname(path) or "."
-    _ensure_private_dir(directory)
-    fd, tmp_path = tempfile.mkstemp(prefix=".thistle-", suffix=".tmp", dir=directory, text=True)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=indent)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_path, path)
-        os.chmod(path, 0o600)
-    finally:
-        if os.path.exists(tmp_path):
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+    write_json(path, data, indent=indent)
 
 
 DEFAULT_SETTINGS = {

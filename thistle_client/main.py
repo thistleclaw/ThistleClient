@@ -10,6 +10,7 @@ Features:
 """
 
 import json
+import fcntl
 import os
 import socket
 import subprocess
@@ -24,8 +25,9 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import GLib, Gtk
 
+from thistle_client.storage import write_json, normalize_selection
 from thistle_client.config import (
-    settings, SUBS_FILE, SINGBOX_CONFIG_FILE, DATA_DIR, write_json_private
+    settings, SUBS_FILE, SINGBOX_CONFIG_FILE, DATA_DIR
 )
 from thistle_client.config_generator import generate_singbox_config
 from thistle_client.core_manager import CoreManager
@@ -51,6 +53,8 @@ class ThistleTrayApp:
         self.delays = {}
         self.is_pinging = False
         self.manager_window = None
+        self.core_busy = False
+        self.pending_connection = None
 
         self.load_data()
 
@@ -88,7 +92,11 @@ class ThistleTrayApp:
 
     def save_data(self):
         try:
-            write_json_private(SUBS_FILE, self.data)
+            normalize_selection(self.data)
+            write_json(SUBS_FILE, self.data)
+            if self.manager_window:
+                self.manager_window.data = self.data
+                self.manager_window.refresh_all()
         except Exception as e:
             print(f"Failed to save data: {e}")
 
@@ -120,15 +128,20 @@ class ThistleTrayApp:
         return []
 
     def sync_config(self, enable_tun: bool = True, restart: bool = False):
+        if self.core_busy:
+            return
+        normalize_selection(self.data)
         nodes = self.get_current_nodes()
         active_node = self.data.get("active_node", "")
         cfg = generate_singbox_config(nodes, active_tag=active_node, enable_tun=enable_tun)
-        write_json_private(SINGBOX_CONFIG_FILE, cfg)
+        write_json(SINGBOX_CONFIG_FILE, cfg)
 
         if restart and self.core.is_running():
             active_dict = self.get_active_node_dict()
-            self.core.restart(active_node=active_dict)
-            self.notify("ThistleClient", "Конфигурация обновлена и туннель перезапущен")
+            self.run_core_action(
+                (lambda: self.core.restart(active_dict)) if nodes else self.core.stop,
+                "Конфигурация VPN обновлена" if nodes else "VPN отключен: нет серверов",
+            )
 
     def build_menu(self):
         for child in self.menu.get_children():
@@ -154,6 +167,7 @@ class ThistleTrayApp:
         # 2. Toggle VPN
         toggle_label = "Отключить VPN" if is_running else "Включить VPN"
         toggle_item = Gtk.MenuItem(label=toggle_label)
+        toggle_item.set_sensitive(not self.core_busy)
         toggle_item.connect("activate", self.on_toggle_vpn)
         self.menu.append(toggle_item)
 
@@ -179,6 +193,7 @@ class ThistleTrayApp:
                 if tag == self.data.get("active_node"):
                     item.set_active(True)
 
+                item.set_sensitive(not self.core_busy)
                 item.connect("toggled", self.on_select_server, tag)
                 servers_sub.append(item)
         else:
@@ -214,22 +229,24 @@ class ThistleTrayApp:
                 if s_name == active_sub:
                     s_item.set_active(True)
 
+                s_item.set_sensitive(not self.core_busy)
                 s_item.connect("toggled", self.on_switch_sub, s_name)
                 subs_sub.append(s_item)
 
             subs_sub.append(Gtk.SeparatorMenuItem())
 
         add_sub_item = Gtk.MenuItem(label="➕ Добавить подписку...")
+        add_sub_item.set_sensitive(not self.core_busy)
         add_sub_item.connect("activate", self.on_add_subscription_dialog)
         subs_sub.append(add_sub_item)
 
         update_sub_item = Gtk.MenuItem(label="🔄 Обновить текущую подписку")
-        update_sub_item.set_sensitive(bool(active_sub and all_subs.get(active_sub, {}).get("url")))
+        update_sub_item.set_sensitive(not self.core_busy and bool(active_sub and all_subs.get(active_sub, {}).get("url")))
         update_sub_item.connect("activate", self.on_refresh_subscription)
         subs_sub.append(update_sub_item)
 
         del_sub_item = Gtk.MenuItem(label="❌ Удалить текущую подписку")
-        del_sub_item.set_sensitive(bool(active_sub and active_sub in all_subs))
+        del_sub_item.set_sensitive(not self.core_busy and bool(active_sub and active_sub in all_subs))
         del_sub_item.connect("activate", self.on_delete_subscription)
         subs_sub.append(del_sub_item)
 
@@ -238,6 +255,7 @@ class ThistleTrayApp:
 
         # 6. Settings
         settings_item = Gtk.MenuItem(label="⚙️ Настройки...")
+        settings_item.set_sensitive(not self.core_busy)
         settings_item.connect("activate", self.on_open_settings)
         self.menu.append(settings_item)
 
@@ -249,7 +267,8 @@ class ThistleTrayApp:
         self.menu.append(Gtk.SeparatorMenuItem())
 
         # 8. Quit
-        quit_item = Gtk.MenuItem(label="🚪 Закрыть ThistleClient")
+        quit_item = Gtk.MenuItem(label="🚪 Отключить VPN и выйти")
+        quit_item.set_sensitive(not self.core_busy)
         quit_item.connect("activate", self.on_quit)
         self.menu.append(quit_item)
 
@@ -273,16 +292,23 @@ class ThistleTrayApp:
         self.manager_window.show_all()
         self.manager_window.present()
 
-    def connect_vpn(self):
-        if not self.core.is_running():
+    def request_connection(self, connected):
+        if self.core_busy:
+            self.pending_connection = connected
+            return
+        if self.core.is_running() != connected:
             self.on_toggle_vpn(None)
 
+    def connect_vpn(self):
+        self.request_connection(True)
+
     def disconnect_vpn(self):
-        if self.core.is_running():
-            self.on_toggle_vpn(None)
+        self.request_connection(False)
 
     def check_status_tick(self) -> bool:
         self.update_icon_state()
+        if self.menu.get_visible() is False:
+            self.build_menu()
         return True
 
     def get_active_node_dict(self) -> dict:
@@ -294,34 +320,59 @@ class ThistleTrayApp:
         return nodes[0] if nodes else None
 
     def on_toggle_vpn(self, widget):
-        if self.core.is_running():
-            self.core.stop()
-            self.notify("ThistleClient", "VPN отключен")
-        else:
-            conflict = self.core.is_conflict_running()
-            if conflict:
-                self.notify("ThistleClient: Конфликт", f"Обнаружен работающий {conflict}! Остановите его перед включением ThistleClient.")
-                if self.manager_window and self.manager_window.is_visible():
-                    self.manager_window.present()
-                return
-            if not self.get_current_nodes():
-                self.notify("ThistleClient", "Ошибка: нет серверов. Сначала добавьте подписку.")
-                return
-            active_node = self.get_active_node_dict()
+        if self.core_busy:
+            return
+        running = self.core.is_running()
+        if not running and not self.get_current_nodes():
+            self.notify("ThistleClient", "Нет серверов. Сначала добавьте подписку.")
+            return
+        if not running:
             self.sync_config(enable_tun=True)
-            success = self.core.start(active_node=active_node)
-            if success:
-                self.notify("ThistleClient", "VPN успешно подключен")
-            else:
-                self.notify("ThistleClient", "Ошибка запуска ядром VPN. Проверьте журнал.")
+        active_node = self.get_active_node_dict()
+        self.run_core_action(
+            self.core.stop if running else lambda: self.core.start(active_node),
+            "VPN отключен" if running else "VPN подключен",
+        )
 
+    def run_core_action(self, action, success_message, on_failure=None):
+        """Serialize UI operations and marshal completion back to GTK."""
+        if self.core_busy:
+            return
+        self.core_busy = True
         self.update_icon_state()
         self.build_menu()
-        if self.manager_window and self.manager_window.is_visible():
-            self.manager_window.refresh_all()
+        if self.manager_window:
+            self.manager_window.update_status_ui()
+
+        def finish(success, message):
+            self.core_busy = False
+            if not success and on_failure is not None:
+                on_failure()
+            self.notify("ThistleClient", message or "Операция с VPN не удалась. Проверьте журнал.")
+            self.update_icon_state()
+            self.build_menu()
+            if self.manager_window:
+                self.manager_window.refresh_all()
+                if not success:
+                    self.manager_window.show_error(message)
+            pending = self.pending_connection
+            self.pending_connection = None
+            if pending is not None:
+                GLib.idle_add(self.request_connection, pending)
+            return False
+
+        def worker():
+            try:
+                success = action()
+                message = success_message if success else self.core.last_error
+            except Exception as exc:
+                success, message = False, str(exc)
+            GLib.idle_add(finish, success, message)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def on_select_server(self, widget, tag: str):
-        if not widget.get_active():
+        if self.core_busy or not widget.get_active():
             return
         previous_tag = self.data.get("active_node", "")
         self.data["active_node"] = tag
@@ -329,17 +380,14 @@ class ThistleTrayApp:
 
         node = self.get_active_node_dict()
         if self.core.is_running():
-            if not self.core.switch_node(node):
+            self.sync_config(enable_tun=True)
+            def restore_selection():
                 self.data["active_node"] = previous_tag
                 self.save_data()
-                self.notify("ThistleClient", f"Не удалось переключиться на сервер: {tag}")
-                self.update_icon_state()
-                self.build_menu()
-                if self.manager_window and self.manager_window.is_visible():
-                    self.manager_window.refresh_all()
-                return
-            self.sync_config(enable_tun=True)
-            self.notify("ThistleClient", f"Сервер переключен: {tag}")
+                self.sync_config(enable_tun=True)
+
+            self.run_core_action(lambda: self.core.switch_node(node), f"Сервер переключен: {tag}",
+                                 on_failure=restore_selection)
         self.update_icon_state()
         self.build_menu()
 
@@ -402,7 +450,7 @@ class ThistleTrayApp:
         self.notify("ThistleClient", "Замер задержки завершен")
 
     def on_switch_sub(self, widget, sub_name: str):
-        if not widget.get_active():
+        if self.core_busy or not widget.get_active():
             return
         self.data["active_sub"] = sub_name
         nodes = self.get_current_nodes()
@@ -410,8 +458,7 @@ class ThistleTrayApp:
             self.data["active_node"] = nodes[0].get("tag", "")
         self.save_data()
         self.delays = {}
-        was_running = self.core.is_running()
-        self.sync_config(enable_tun=True, restart=was_running)
+        self.sync_config(enable_tun=True, restart=True)
         self.update_icon_state()
         self.build_menu()
         if self.manager_window and self.manager_window.is_visible():
@@ -428,8 +475,7 @@ class ThistleTrayApp:
         mixed_port = int(settings.get("network", "mixed_port", 2080))
         self.clash_api = ClashAPI(port=clash_port)
         self.pinger = MultiModePinger(mixed_port=mixed_port, clash_port=clash_port)
-        was_running = self.core.is_running()
-        self.sync_config(enable_tun=was_running, restart=was_running)
+        self.sync_config(enable_tun=True, restart=True)
         self.update_icon_state()
         self.build_menu()
         if self.manager_window and self.manager_window.is_visible():
@@ -482,8 +528,7 @@ class ThistleTrayApp:
                         self.data["active_sub"] = name
                         self.data["active_node"] = nodes[0].get("tag", "")
                         self.save_data()
-                        was_running = self.core.is_running()
-                        self.sync_config(enable_tun=True, restart=was_running)
+                        self.sync_config(enable_tun=True, restart=True)
                         self.update_icon_state()
                         self.build_menu()
                         self.notify("ThistleClient", f"Подписка '{name}' добавлена! Найдено серверов: {len(nodes)}")
@@ -500,22 +545,29 @@ class ThistleTrayApp:
         if not sub_data or not sub_data.get("url"):
             return
 
+        def apply_result(nodes, message):
+            if self.data.get("subs", {}).get(sub_name) is not sub_data:
+                return False
+            if not nodes:
+                self.notify("ThistleClient", message)
+                return False
+            if self.core_busy:
+                GLib.timeout_add(100, apply_result, nodes, message)
+                return False
+            sub_data["nodes"] = nodes
+            sub_data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            self.save_data()
+            self.sync_config(True, restart=self.data.get("active_sub") == sub_name)
+            self.build_menu()
+            self.notify("ThistleClient", f"Подписка обновлена: {len(nodes)} серверов")
+            return False
+
         def worker():
             try:
                 nodes = fetch_subscription(sub_data["url"])
-                if nodes:
-                    sub_data["nodes"] = nodes
-                    sub_data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-                    self.save_data()
-                    was_running = self.core.is_running()
-                    GLib.idle_add(self.sync_config, True, was_running)
-                    GLib.idle_add(self.update_icon_state)
-                    GLib.idle_add(self.build_menu)
-                    GLib.idle_add(self.notify, "ThistleClient", f"Подписка '{sub_name}' обновлена ({len(nodes)} серв.)")
-                else:
-                    GLib.idle_add(self.notify, "ThistleClient", "Серверы в подписке не найдены")
-            except Exception as e:
-                GLib.idle_add(self.notify, "ThistleClient", f"Ошибка обновления: {e}")
+                GLib.idle_add(apply_result, nodes, "Серверы в подписке не найдены.")
+            except Exception as exc:
+                GLib.idle_add(apply_result, None, f"Ошибка обновления: {exc}")
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -524,7 +576,6 @@ class ThistleTrayApp:
         if not sub_name or sub_name not in self.data.get("subs", {}):
             return
 
-        was_running = self.core.is_running()
         del self.data["subs"][sub_name]
         remaining = list(self.data["subs"].keys())
         if remaining:
@@ -536,17 +587,17 @@ class ThistleTrayApp:
             self.data["active_node"] = ""
 
         self.save_data()
-        if remaining:
-            self.sync_config(enable_tun=True, restart=was_running)
-        else:
-            if was_running:
-                self.core.stop()
-            self.sync_config(enable_tun=False)
+        self.sync_config(enable_tun=True, restart=True)
         self.update_icon_state()
         self.build_menu()
         self.notify("ThistleClient", f"Подписка '{sub_name}' удалена")
 
     def on_quit(self, widget=None):
+        if self.core_busy:
+            return
+        if not self.core.stop():
+            self.notify("ThistleClient", self.core.last_error)
+            return
         try:
             sock_path = get_ipc_socket_path()
             if os.path.exists(sock_path):
@@ -571,11 +622,10 @@ def get_ipc_socket_path() -> str:
 def send_ipc_command(cmd: str) -> bool:
     sock_path = get_ipc_socket_path()
     try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(1.5)
-        s.connect(sock_path)
-        s.sendall(cmd.encode("utf-8") + b"\n")
-        s.close()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(1.5)
+            s.connect(sock_path)
+            s.sendall(cmd.encode("utf-8") + b"\n")
         return True
     except (FileNotFoundError, ConnectionRefusedError, OSError):
         return False
@@ -601,8 +651,9 @@ def start_ipc_server(app) -> socket.socket:
         while True:
             try:
                 conn, _ = server_sock.accept()
-                raw_data = conn.recv(1024).decode("utf-8", errors="ignore").strip()
-                conn.close()
+                with conn:
+                    conn.settimeout(1)
+                    raw_data = conn.recv(1024).decode("utf-8", errors="ignore").strip()
                 if raw_data == "SHOW":
                     GLib.idle_add(app.show_manager_window)
                 elif raw_data == "CONNECT":
@@ -613,7 +664,9 @@ def start_ipc_server(app) -> socket.socket:
                     GLib.idle_add(app.on_toggle_vpn, None)
                 elif raw_data == "QUIT":
                     GLib.idle_add(app.on_quit)
-            except Exception:
+            except socket.timeout:
+                continue
+            except OSError:
                 break
 
     t = threading.Thread(target=listen_loop, daemon=True)
@@ -637,28 +690,46 @@ def main():
     elif show_gui:
         cmd = "SHOW"
 
-    # If an instance is already running, forward command and exit
-    if cmd and send_ipc_command(cmd):
-        sys.exit(0)
-
-    app = ThistleTrayApp(show_gui=show_gui)
-    ipc_server = start_ipc_server(app)
-
-    try:
-        Gtk.main()
-    finally:
-        if ipc_server:
-            try:
-                ipc_server.close()
-            except Exception:
-                pass
+    if cmd == "QUIT":
+        send_ipc_command(cmd)
+        return
+    lock_path = get_ipc_socket_path() + ".lock"
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    with open(lock_path, "a") as instance_lock:
         try:
-            sock_path = get_ipc_socket_path()
-            if os.path.exists(sock_path):
-                os.unlink(sock_path)
-        except OSError:
-            pass
+            fcntl.flock(instance_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # The owner may still be constructing GTK widgets and its IPC server.
+            for _ in range(30):
+                if send_ipc_command(cmd or "SHOW"):
+                    return
+                time.sleep(0.1)
+            print("ThistleClient уже запущен, но пока не отвечает.", file=sys.stderr)
+            return
 
+        app = ThistleTrayApp(show_gui=show_gui)
+        ipc_server = start_ipc_server(app)
+        if cmd == "CONNECT":
+            GLib.idle_add(app.connect_vpn)
+        elif cmd == "DISCONNECT":
+            GLib.idle_add(app.disconnect_vpn)
+        elif cmd == "TOGGLE":
+            GLib.idle_add(app.on_toggle_vpn, None)
+
+        try:
+            Gtk.main()
+        finally:
+            if ipc_server:
+                try:
+                    ipc_server.close()
+                except Exception:
+                    pass
+            try:
+                sock_path = get_ipc_socket_path()
+                if os.path.exists(sock_path):
+                    os.unlink(sock_path)
+            except OSError:
+                pass
 
 if __name__ == "__main__":
     main()

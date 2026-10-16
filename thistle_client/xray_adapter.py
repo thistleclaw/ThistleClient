@@ -7,14 +7,14 @@ SplitHTTP (xhttp), gRPC, and Vision protocols.
 
 import json
 import os
-import signal
-import shutil
 import socket
+import shutil
 import subprocess
 import time
 import urllib.parse
 
-from thistle_client.config import DATA_DIR, XRAY_SOCKS_PORT, write_json_private
+from thistle_client.config import DATA_DIR, XRAY_SOCKS_PORT
+from thistle_client.storage import write_json
 
 XRAY_BINARY = "/usr/local/bin/xray"
 XRAY_CONFIG_FILE = os.path.join(DATA_DIR, "xray_config.json")
@@ -197,6 +197,9 @@ def node_to_xray_outbound(node: dict) -> dict:
     return {}
 
 
+from thistle_client.process_lifecycle import matches_process, managed_pids, stop_processes
+
+
 class XrayManager:
     def __init__(self, binary_path: str = None):
         self.binary_path = binary_path or shutil.which("xray") or XRAY_BINARY
@@ -204,38 +207,23 @@ class XrayManager:
         self.log_file = XRAY_LOG_FILE
         self.config_file = XRAY_CONFIG_FILE
         self.process = None
+        self.last_error = ""
 
     def is_running(self) -> bool:
-        if os.path.exists(self.pid_file):
-            try:
-                with open(self.pid_file, "r") as f:
-                    pid = int(f.read().strip())
-                os.kill(pid, 0)
-                return self._is_managed_process(pid)
-            except (OSError, ValueError):
-                pass
-        return False
+        return bool(managed_pids(self, self.config_file))
 
     def _is_managed_process(self, pid: int) -> bool:
-        """Refuse to treat another VPN client's Xray as ours."""
-        try:
-            with open(f"/proc/{pid}/cmdline", "rb") as proc_file:
-                argv = [arg.decode(errors="replace") for arg in proc_file.read().split(b"\0") if arg]
-            if not argv or os.path.basename(argv[0]) != os.path.basename(self.binary_path):
-                return False
-            for index, arg in enumerate(argv[:-1]):
-                if arg in ("-c", "--config"):
-                    return os.path.realpath(argv[index + 1]) == os.path.realpath(self.config_file)
-            return False
-        except (OSError, ValueError):
-            return False
+        return matches_process(pid, self.binary_path, self.config_file)
 
     def start(self, node: dict, listen_port: int = XRAY_SOCKS_PORT) -> bool:
         """Starts Xray routing outbound traffic for the specified node."""
-        self.stop()
+        self.last_error = ""
+        if not self.stop():
+            return False
 
         outbound = node_to_xray_outbound(node)
         if not outbound:
+            self.last_error = "Неподдерживаемая конфигурация Xray."
             return False
 
         hosts = {
@@ -281,58 +269,24 @@ class XrayManager:
             ]
         }
 
-        os.makedirs(os.path.dirname(self.config_file), mode=0o700, exist_ok=True)
-        write_json_private(self.config_file, config)
-
         try:
-            log_fd = open(self.log_file, "a")
-            self.process = subprocess.Popen(
-                [self.binary_path, "run", "-c", self.config_file],
-                stdout=log_fd,
-                stderr=log_fd,
-                preexec_fn=os.setsid
-            )
+            write_json(self.config_file, config)
+            with open(self.log_file, "a") as log_fd:
+                self.process = subprocess.Popen(
+                    [self.binary_path, "run", "-c", self.config_file],
+                    stdout=log_fd, stderr=log_fd, start_new_session=True,
+                )
             with open(self.pid_file, "w") as f:
                 f.write(str(self.process.pid))
 
             time.sleep(0.5)
-            return self.is_running()
+            if self.is_running():
+                return True
+            self.last_error = "Xray завершился при запуске. Проверьте журнал Xray."
         except Exception as e:
-            print(f"[XrayManager] Failed to start xray: {e}")
-            return False
+            self.last_error = f"Не удалось запустить Xray: {e}"
+        self.stop()
+        return False
 
     def stop(self) -> bool:
-        if os.path.exists(self.pid_file):
-            try:
-                with open(self.pid_file, "r") as f:
-                    pid = int(f.read().strip())
-                if self._is_managed_process(pid):
-                    try:
-                        pgid = os.getpgid(pid)
-                        if pgid == pid:
-                            os.killpg(pgid, signal.SIGTERM)
-                        else:
-                            os.kill(pid, signal.SIGTERM)
-                    except OSError:
-                        pass
-                    deadline = time.monotonic() + 1.0
-                    while time.monotonic() < deadline:
-                        try:
-                            os.kill(pid, 0)
-                        except OSError:
-                            break
-                        time.sleep(0.05)
-                    else:
-                        try:
-                            if os.getpgid(pid) == pid:
-                                os.killpg(pid, signal.SIGKILL)
-                            else:
-                                os.kill(pid, signal.SIGKILL)
-                        except OSError:
-                            pass
-            except Exception:
-                pass
-            finally:
-                if os.path.exists(self.pid_file):
-                    os.remove(self.pid_file)
-        return not self.is_running()
+        return stop_processes(self, self.config_file)

@@ -26,6 +26,10 @@
 <a name="-русская-версия"></a>
 # 🇷🇺 Русская версия
 
+## Обновление 1.0.1
+
+Исправлены повторные подключения, остановка ядер VPN, зависания окна при подключении и применение подписок и настроек. Подробности — в [истории изменений](CHANGELOG.md).
+
 ## 💡 О проекте
 
 Большинство популярных клиентов для обхода блокировок (Happ, v2rayA, Nekoray) построены на базе тяжелых фреймворков (Electron, Chromium, Qt WebEngine), потребляя **350–500 МБ оперативной памяти** в фоне исключительно на отрисовку интерфейса. При этом многие из них используют поверхностный замер задержки (TCP SYN ping вместо реального HTTP-ответа), вызывают конфликты таблиц маршрутизации ядра и оставляют зомби-процессы.
@@ -141,7 +145,7 @@ thistle-client --gui
 
 ## 🧪 Тестирование
 
-Проект покрыт автоматическим набором из 30 юнит-тестов (парсеры VLESS/Hy2, изоляция портов, трансляция Xray, проверка маршрутизации и отсутствие утечек процессов):
+Проект покрыт автоматическим набором из 45 тестов (парсеры VLESS/Hy2, изоляция портов, трансляция Xray, проверка маршрутизации и отсутствие утечек процессов, повторные подключения, восстановление без PID-файла и защиту от нескольких экземпляров):
 
 ```bash
 python3 -m unittest discover tests
@@ -268,7 +272,7 @@ thistle-client --gui
 
 ## 🧪 Testing
 
-The test suite contains 30 automated unit tests verifying VLESS/Hy2 parsers, Xray outbound translation, dynamic port isolation, routing checks, and leak-free process management:
+The test suite contains 45 automated tests verifying VLESS/Hy2 parsers, Xray outbound translation, dynamic port isolation, routing checks, and leak-free process management:
 
 ```bash
 python3 -m unittest discover tests
@@ -289,7 +293,7 @@ ThistleClient/
 ├── LICENSE                   # MIT License
 ├── README.md                 # Bilingual documentation
 ├── tests/                    # Unit test suite
-│   └── test_thistle.py       # 30 automated tests
+│   └── test_thistle.py       # Core regression tests
 ├── thistle_client/           # Application package
 │   ├── config.py             # Settings manager
 │   ├── pinger.py             # Isolated Proxy-GET engine

@@ -8,7 +8,6 @@ and Xray-core (VLESS Reality with MLKEM768/spiderX, SplitHTTP, gRPC, and Vision)
 import json
 import os
 import re
-import signal
 import shutil
 import subprocess
 import time
@@ -16,20 +15,12 @@ from thistle_client.config import SINGBOX_CONFIG_FILE, SINGBOX_LOG_FILE, SINGBOX
 from thistle_client.xray_adapter import XrayManager, is_xray_node
 
 
+from thistle_client.process_lifecycle import matches_process, managed_pids, stop_processes
+
+
 def _is_managed_singbox_process(pid: int, binary_path: str = "/usr/local/bin/sing-box",
                                 config_path: str = SINGBOX_CONFIG_FILE) -> bool:
-    """Only identify the sing-box instance launched with this app's config."""
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as proc_file:
-            argv = [arg.decode(errors="replace") for arg in proc_file.read().split(b"\0") if arg]
-        if not argv or os.path.basename(argv[0]) != os.path.basename(binary_path):
-            return False
-        for index, arg in enumerate(argv[:-1]):
-            if arg in ("-c", "--config"):
-                return os.path.realpath(argv[index + 1]) == os.path.realpath(config_path)
-        return False
-    except (OSError, ValueError):
-        return False
+    return matches_process(pid, binary_path, config_path)
 
 
 def _tun_route_conflict(config_path: str) -> str:
@@ -119,6 +110,8 @@ def check_conflicting_vpns() -> str:
                     continue
                 with open(f"/proc/{pid}/cmdline", "rb") as f:
                     cmd = f.read().lower()
+                    if not cmd:
+                        continue
                     if b"happ" in cmd:
                         return "Happ"
                     return f"sing-box (PID {pid})"
@@ -138,6 +131,7 @@ class CoreManager:
         self.process = None
         self.xray = XrayManager()
         self.current_node = None
+        self.last_error = ""
 
     def is_conflict_running(self) -> str:
         """Returns name of conflicting VPN process if detected."""
@@ -145,18 +139,11 @@ class CoreManager:
 
     def is_running(self) -> bool:
         """Checks whether sing-box is currently running."""
-        if os.path.exists(self.pid_file):
-            try:
-                with open(self.pid_file, "r") as f:
-                    pid = int(f.read().strip())
-                os.kill(pid, 0)
-                return _is_managed_singbox_process(pid, self.binary_path, self.config_path)
-            except (OSError, ValueError):
-                pass
-        return False
+        return bool(managed_pids(self, self.config_path))
 
     def start(self, active_node: dict = None) -> bool:
         """Launches core processes (Sing-box TUN + Xray backend if needed)."""
+        self.last_error = ""
         if active_node is not None:
             self.current_node = active_node
         node_to_use = active_node if active_node is not None else self.current_node
@@ -164,125 +151,83 @@ class CoreManager:
         if self.is_running():
             return True
         if not os.path.exists(self.config_path):
+            self.last_error = "Конфигурация VPN не найдена."
             return False
 
         conflict = self.is_conflict_running()
         if conflict:
-            print(f"[CoreManager] Refusing to start Thistle TUN while {conflict} is active.")
+            self.last_error = f"Обнаружен работающий {conflict}. Остановите его перед подключением."
             return False
         route_conflict = _tun_route_conflict(self.config_path)
         if route_conflict:
-            print(f"[CoreManager] Refusing to start Thistle TUN: {route_conflict}.")
+            self.last_error = f"Конфликт маршрутов: {route_conflict}"
             return False
 
         # If node requires Xray (Reality, XHTTP), start Xray
         if node_to_use and is_xray_node(node_to_use):
             if not self.xray.start(node_to_use, listen_port=XRAY_SOCKS_PORT):
-                print("[CoreManager] Refusing to start TUN because Xray backend failed to start.")
+                self.last_error = self.xray.last_error or "Не удалось запустить Xray."
                 return False
         else:
-            self.xray.stop()
+            if not self.xray.stop():
+                self.last_error = self.xray.last_error
+                return False
 
         try:
-            log_fd = open(self.log_file, "a")
-            self.process = subprocess.Popen(
-                [self.binary_path, "run", "-c", self.config_path],
-                stdout=log_fd,
-                stderr=log_fd,
-                preexec_fn=os.setsid
-            )
+            with open(self.log_file, "a") as log_fd:
+                self.process = subprocess.Popen(
+                    [self.binary_path, "run", "-c", self.config_path],
+                    stdout=log_fd, stderr=log_fd, start_new_session=True,
+                )
             with open(self.pid_file, "w") as f:
                 f.write(str(self.process.pid))
 
             time.sleep(1)
-            running = self.is_running()
-            if not running:
-                self.xray.stop()
-            return running
+            if self.is_running():
+                return True
+            self.last_error = "Ядро sing-box завершилось при запуске. Проверьте журнал."
         except Exception as e:
-            self.xray.stop()
-            print(f"[CoreManager] Failed to start sing-box: {e}")
-            return False
+            self.last_error = f"Не удалось запустить sing-box: {e}"
+        self.stop()
+        return False
 
     def switch_node(self, node: dict) -> bool:
-        """Hot-switches active node."""
+        """Select a node and report failures from both core and selector."""
         if not node:
+            self.last_error = "Сервер не выбран."
             return False
-
-        self.current_node = node
+        if not self.is_running():
+            return self.start(node)
+        from thistle_client.clash_api import ClashAPI
+        from thistle_client.config import settings
+        clash = ClashAPI(port=int(settings.get("network", "clash_port", 9095)))
         if is_xray_node(node):
-            if not self.is_running():
-                return self.start(node)
-            switched = self.xray.start(node, listen_port=XRAY_SOCKS_PORT)
-            if not switched:
+            if not self.xray.start(node, listen_port=XRAY_SOCKS_PORT):
+                self.last_error = self.xray.last_error or "Не удалось переключить Xray."
                 return False
-            try:
-                from thistle_client.clash_api import ClashAPI
-                from thistle_client.config import settings
-                clash = ClashAPI(port=int(settings.get("network", "clash_port", 9095)))
-                clash.select_proxy("xray-out")
-            except Exception:
-                pass
-            return switched
+            selected = clash.select_proxy("xray-out")
         else:
-            self.xray.stop()
-            tag = node.get("tag", "")
-            try:
-                from thistle_client.clash_api import ClashAPI
-                from thistle_client.config import settings
-                clash = ClashAPI(port=int(settings.get("network", "clash_port", 9095)))
-                if clash.select_proxy(tag):
-                    return True
-            except Exception:
-                pass
-            return self.restart(node)
+            selected = clash.select_proxy(node.get("tag", ""))
+            if selected:
+                self.xray.stop()
+        if selected:
+            self.current_node = node
+            self.last_error = ""
+            return True
+        return self.restart(node)
 
     def stop(self) -> bool:
-        """Terminates running processes gracefully."""
-        self.xray.stop()
-
-        if os.path.exists(self.pid_file):
-            try:
-                with open(self.pid_file, "r") as f:
-                    pid = int(f.read().strip())
-                if _is_managed_singbox_process(pid, self.binary_path, self.config_path):
-                    try:
-                        pgid = os.getpgid(pid)
-                        if pgid == pid:
-                            os.killpg(pgid, signal.SIGTERM)
-                        else:
-                            os.kill(pid, signal.SIGTERM)
-                    except OSError:
-                        pass
-                    deadline = time.monotonic() + 1.0
-                    while time.monotonic() < deadline:
-                        try:
-                            os.kill(pid, 0)
-                        except OSError:
-                            break
-                        time.sleep(0.05)
-                    else:
-                        try:
-                            if os.getpgid(pid) == pid:
-                                os.killpg(pid, signal.SIGKILL)
-                            else:
-                                os.kill(pid, signal.SIGKILL)
-                        except OSError:
-                            pass
-            except Exception:
-                pass
-            finally:
-                if os.path.exists(self.pid_file):
-                    os.remove(self.pid_file)
-        return not self.is_running()
+        """Keep ownership metadata until both cores have actually stopped."""
+        stopped = stop_processes(self, self.config_path)
+        xray_stopped = self.xray.stop() if stopped else False
+        if stopped and not xray_stopped:
+            self.last_error = self.xray.last_error
+        return stopped and xray_stopped
 
     def restart(self, active_node: dict = None) -> bool:
-        """Restarts sing-box process."""
-        if active_node is not None:
-            self.current_node = active_node
-        self.stop()
-        time.sleep(0.5)
-        return self.start(self.current_node)
+        if not self.stop():
+            return False
+        return self.start(active_node if active_node is not None else self.current_node)
 
     def get_recent_logs(self, max_lines: int = 25) -> str:
         """Retrieves recent lines from singbox.log."""

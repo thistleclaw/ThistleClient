@@ -218,6 +218,8 @@ class TestCloseToTrayAndSettings(unittest.TestCase):
         from thistle_client.manager_gui import ThistleManagerWindow
 
         mock_tray = MagicMock()
+        mock_tray.data = {"subs": {}, "active_sub": "", "active_node": ""}
+        mock_tray.core_busy = False
         win = ThistleManagerWindow(tray_app=mock_tray)
         win.hide = MagicMock()
 
@@ -229,10 +231,10 @@ class TestCloseToTrayAndSettings(unittest.TestCase):
 
         # When close_to_tray is False: on_delete_event should call Gtk.main_quit and return False
         settings.set("app", "close_to_tray", False)
-        with patch("thistle_client.manager_gui.Gtk.main_quit") as mock_quit:
-            res_no_tray = win.on_delete_event(None, None)
-            self.assertFalse(res_no_tray)
-            mock_quit.assert_called_once()
+        res_no_tray = win.on_delete_event(None, None)
+        self.assertTrue(res_no_tray)
+        mock_tray.on_quit.assert_called_once()
+        win.destroy()
 
         # Restore default
         settings.set("app", "close_to_tray", True)
