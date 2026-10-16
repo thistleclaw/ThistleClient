@@ -337,24 +337,8 @@ class MultiModePinger:
                         "outboundTag": out_tag
                     })
 
-                xray_hosts = {
-                    "dns.google": "8.8.8.8",
-                    "cloudflare-dns.com": "1.1.1.1",
-                }
-                for _, n in xray_nodes:
-                    srv = n.get("server", "").strip()
-                    if srv and srv not in xray_hosts:
-                        try:
-                            xray_hosts[srv] = socket.gethostbyname(srv)
-                        except Exception:
-                            pass
-
                 xray_cfg = {
                     "log": {"loglevel": "error"},
-                    "dns": {
-                        "hosts": xray_hosts,
-                        "servers": ["8.8.8.8", "1.1.1.1"]
-                    },
                     "inbounds": inbounds,
                     "outbounds": outbounds,
                     "routing": {

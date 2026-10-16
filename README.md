@@ -26,7 +26,9 @@
 <a name="-русская-версия"></a>
 # 🇷🇺 Русская версия
 
-## Обновление 1.0.3
+## Обновление 1.0.4
+
+Исправлен оставшийся обход защищённого DNS во временном Xray при проверке пинга.
 
 Защищённый DNS через VPN, отдельный начальный DoH для адреса VPN-сервера и отсутствие отката на открытый DNS. Настройки находятся во вкладке «DNS». Если начальный DoH заблокирован, для первого подключения нужен VPN-узел с IP-адресом или ещё действующий кэш адреса. Подробности — в [истории изменений](CHANGELOG.md).
 
@@ -145,7 +147,7 @@ thistle-client --gui
 
 ## 🧪 Тестирование
 
-Проект покрыт автоматическим набором из 70 тестов (парсеры VLESS/Hy2, изоляция портов, трансляция Xray, проверка маршрутизации и отсутствие утечек процессов, повторные подключения, восстановление без PID-файла и защиту от нескольких экземпляров):
+Проект покрыт автоматическим набором из 73 тестов (парсеры VLESS/Hy2, изоляция портов, трансляция Xray, проверка маршрутизации и отсутствие утечек процессов, повторные подключения, восстановление без PID-файла и защиту от нескольких экземпляров):
 
 ```bash
 python3 -m unittest discover tests
@@ -272,7 +274,7 @@ thistle-client --gui
 
 ## 🧪 Testing
 
-The test suite contains 70 automated tests verifying VLESS/Hy2 parsers, Xray outbound translation, dynamic port isolation, routing checks, and leak-free process management:
+The test suite contains 73 automated tests verifying VLESS/Hy2 parsers, Xray outbound translation, dynamic port isolation, routing checks, and leak-free process management:
 
 ```bash
 python3 -m unittest discover tests
