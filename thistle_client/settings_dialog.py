@@ -10,6 +10,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Pango
 
+from thistle_client.ui_helpers import button_icon, menu_item, icon_label, copy_subscription_url
 from thistle_client.config import settings, SINGBOX_LOG_FILE
 
 
@@ -23,12 +24,13 @@ class SettingsDialog(Gtk.Dialog):
 
         self.add_buttons(
             "Отмена", Gtk.ResponseType.CANCEL,
-            "💾 Сохранить и применить", Gtk.ResponseType.OK
+            "Сохранить и применить", Gtk.ResponseType.OK
         )
 
         # Style the OK button as suggested action
         btn_ok = self.get_widget_for_response(Gtk.ResponseType.OK)
         if btn_ok:
+            button_icon(btn_ok, "document-save-symbolic")
             btn_ok.get_style_context().add_class("suggested-action")
 
         content = self.get_content_area()
@@ -41,19 +43,19 @@ class SettingsDialog(Gtk.Dialog):
         content_area.pack_start(notebook, True, True, 6)
 
         # Page 1: Latency & Ping
-        notebook.append_page(self.build_ping_page(), Gtk.Label(label="⚡ Пинг и Задержка"))
+        notebook.append_page(self.build_ping_page(), icon_label("Пинг", "network-transmit-receive-symbolic"))
 
         # Page 2: Network & TUN
-        notebook.append_page(self.build_network_page(), Gtk.Label(label="🌐 Сеть и TUN"))
+        notebook.append_page(self.build_network_page(), icon_label("Сеть", "network-wired-symbolic"))
 
         # Page 3: DNS
-        notebook.append_page(self.build_dns_page(), Gtk.Label(label="🔒 DNS Резолвер"))
+        notebook.append_page(self.build_dns_page(), icon_label("DNS", "network-server-symbolic"))
 
         # Page 4: Routing
-        notebook.append_page(self.build_routing_page(), Gtk.Label(label="🔀 Маршрутизация"))
+        notebook.append_page(self.build_routing_page(), icon_label("Маршруты", "network-workgroup-symbolic"))
 
         # Page 5: App & Logs
-        notebook.append_page(self.build_app_page(), Gtk.Label(label="⚙️ Приложение"))
+        notebook.append_page(self.build_app_page(), icon_label("Приложение", "emblem-system-symbolic"))
 
         content_area.show_all()
 
@@ -274,15 +276,23 @@ class SettingsDialog(Gtk.Dialog):
 
         vbox.pack_start(grp_app, False, False, 0)
 
+        grp_subscriptions = self._create_group("Обновление подписок")
+        self.chk_auto_update = Gtk.CheckButton(label="Автоматически обновлять подписки")
+        grp_subscriptions.pack_start(self.chk_auto_update, False, False, 0)
+        self.spin_update_interval = Gtk.SpinButton.new_with_range(1, 168, 1)
+        self.chk_auto_update.connect("toggled", lambda button: self.spin_update_interval.set_sensitive(button.get_active()))
+        grp_subscriptions.pack_start(self._create_row("Интервал (часы):", self.spin_update_interval), False, False, 0)
+        vbox.pack_start(grp_subscriptions, False, False, 0)
+
         # Log & Tools
         grp_tools = self._create_group("Диагностика и Журнал")
-        btn_view_logs = Gtk.Button(label="📄 Открыть журнал singbox.log")
+        btn_view_logs = button_icon(Gtk.Button(label="Открыть журнал singbox.log"), "text-x-generic-symbolic")
         btn_view_logs.connect("clicked", self.on_view_logs_clicked)
 
-        btn_clear_logs = Gtk.Button(label="🧹 Очистить журнал")
+        btn_clear_logs = button_icon(Gtk.Button(label="Очистить журнал"), "edit-clear-all-symbolic")
         btn_clear_logs.connect("clicked", self.on_clear_logs_clicked)
 
-        btn_reset_defaults = Gtk.Button(label="🔄 Сбросить все настройки по умолчанию")
+        btn_reset_defaults = button_icon(Gtk.Button(label="Сбросить все настройки по умолчанию"), "view-refresh-symbolic")
         btn_reset_defaults.connect("clicked", self.on_reset_defaults_clicked)
 
         tools_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -296,6 +306,9 @@ class SettingsDialog(Gtk.Dialog):
 
     # --- Data Binding ---
     def load_values(self):
+        self.chk_auto_update.set_active(bool(settings.get("subscriptions", "auto_update", True)))
+        self.spin_update_interval.set_value(int(settings.get("subscriptions", "interval_hours", 24)))
+        self.spin_update_interval.set_sensitive(self.chk_auto_update.get_active())
         # Ping
         self.combo_ping_method.set_active_id("Proxy-GET")
         self.spin_ping_timeout.set_value(int(settings.get("ping", "timeout", 4)))
@@ -338,6 +351,8 @@ class SettingsDialog(Gtk.Dialog):
         self.combo_log_level.set_active_id(settings.get("app", "log_level", "warn"))
 
     def save_values(self):
+        settings.set("subscriptions", "auto_update", self.chk_auto_update.get_active())
+        settings.set("subscriptions", "interval_hours", int(self.spin_update_interval.get_value()))
         # Ping
         settings.set("ping", "method", "Proxy-GET")
         settings.set("ping", "timeout", int(self.spin_ping_timeout.get_value()))

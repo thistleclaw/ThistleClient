@@ -169,16 +169,24 @@ class MultiModePinger:
 
     def ping_proxy_get_batch(self, nodes: list, timeout: int = 4,
                              test_url: str = "http://connectivity-check.ubuntu.com",
-                             on_progress=None, max_workers: int = 16) -> dict:
+                             on_progress=None, max_workers: int = 16, cancel_event=None) -> dict:
         # Keep free-port allocation, startup, requests, and teardown in one
         # critical section so concurrent callers cannot race on loopback ports.
-        with _batch_lock:
+        cancel_event = cancel_event or threading.Event()
+        while not _batch_lock.acquire(timeout=0.1):
+            if cancel_event.is_set():
+                return {}
+        try:
+            if cancel_event.is_set():
+                return {}
             return self._ping_proxy_get_batch_locked(
-                nodes, timeout, test_url, on_progress, max_workers
+                nodes, timeout, test_url, on_progress, max_workers, cancel_event
             )
+        finally:
+            _batch_lock.release()
 
     def _ping_proxy_get_batch_locked(self, nodes: list, timeout: int,
-                                     test_url: str, on_progress, max_workers: int) -> dict:
+                                     test_url: str, on_progress, max_workers: int, cancel_event) -> dict:
         """Measure a complete HTTP GET through isolated, loopback-only proxies."""
         results = {}
         if not nodes:
@@ -213,7 +221,7 @@ class MultiModePinger:
         reported = set()
 
         def report(idx: int, delay: int) -> None:
-            if idx in reported:
+            if cancel_event.is_set() or idx in reported:
                 return
             reported.add(idx)
             tag = nodes[idx].get("tag", "")
@@ -242,7 +250,7 @@ class MultiModePinger:
         def wait_for_listeners(proc: subprocess.Popen, ports: list, startup_timeout: float) -> set:
             pending = set(ports)
             deadline = time.monotonic() + startup_timeout
-            while pending and proc.poll() is None:
+            while pending and proc.poll() is None and not cancel_event.is_set():
                 for port in tuple(pending):
                     try:
                         with socket.create_connection(("127.0.0.1", port), timeout=0.1):
@@ -259,18 +267,28 @@ class MultiModePinger:
         def curl_get(proxy_url: str) -> int:
             """Return curl's transfer time only when an HTTP response completed."""
             try:
-                completed = subprocess.run(
+                if cancel_event.is_set():
+                    return -1
+                with subprocess.Popen(
                     [
                         "curl", "--silent", "--show-error", "--request", "GET",
                         "--output", os.devnull, "--write-out", "%{http_code} %{time_total}",
                         "--noproxy", "", "--proxy", proxy_url,
                         "--connect-timeout", str(timeout), "--max-time", str(timeout), test_url,
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout + 1.0,
-                    check=False,
-                )
+                    ], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                ) as request:
+                    deadline = time.monotonic() + timeout + 1
+                    while True:
+                        if cancel_event.is_set() or time.monotonic() >= deadline:
+                            request.kill()
+                            request.communicate()
+                            return -1
+                        try:
+                            output, _ = request.communicate(timeout=0.1)
+                            break
+                        except subprocess.TimeoutExpired:
+                            continue
+                    completed = subprocess.CompletedProcess(request.args, request.returncode, output)
                 if completed.returncode != 0:
                     return -1
                 status_text, elapsed_text = completed.stdout.strip().split()
@@ -283,6 +301,8 @@ class MultiModePinger:
                 return -1
 
         try:
+            if cancel_event.is_set():
+                return results
             # Reserve one unique set before either core starts. A batch lock keeps
             # another ThistleClient measurement from selecting the same ports.
             ports = _get_free_ports(len(nodes))
@@ -415,6 +435,8 @@ class MultiModePinger:
 
             def test_worker(item):
                 idx, is_x, port, node = item
+                if cancel_event.is_set():
+                    return idx, -1
                 proxy_url = f"socks5h://127.0.0.1:{port}" if is_x else f"http://127.0.0.1:{port}"
                 return idx, curl_get(proxy_url)
 
@@ -452,20 +474,23 @@ class MultiModePinger:
     def ping_all(self, nodes: list, method: str = "Proxy-GET", timeout: int = 4,
                  test_url: str = "http://connectivity-check.ubuntu.com",
                  clash_api=None, max_workers: int = 8,
-                 on_progress=None) -> dict:
+                 on_progress=None, cancel_event=None) -> dict:
         """Pings all nodes with real-time on_progress callback without touching the active VPN."""
         results = {}
-        if not nodes:
+        cancel_event = cancel_event or threading.Event()
+        if not nodes or cancel_event.is_set():
             return results
 
         if method == "Proxy-GET":
             # Batch in chunks of 25 nodes for high stability
             batch_size = 25
             for start in range(0, len(nodes), batch_size):
+                if cancel_event.is_set():
+                    break
                 chunk = nodes[start:start + batch_size]
                 chunk_res = self.ping_proxy_get_batch(
                     chunk, timeout=timeout, test_url=test_url, on_progress=on_progress,
-                    max_workers=max_workers,
+                    max_workers=max_workers, cancel_event=cancel_event,
                 )
                 results.update(chunk_res)
             return results

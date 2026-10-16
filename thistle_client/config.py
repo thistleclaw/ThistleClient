@@ -35,6 +35,7 @@ def write_json_private(path: str, data, *, indent: int = 2) -> None:
 
 
 DEFAULT_SETTINGS = {
+    "subscriptions": {"auto_update": True, "interval_hours": 24},
     "ping": {
         "method": "Proxy-GET",         # Options: "Proxy-GET", "TCP", "Proxy-HEAD", "ICMP"
         "timeout": 4,            # Seconds (1 to 15)

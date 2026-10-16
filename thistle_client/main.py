@@ -26,6 +26,7 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import GLib, Gtk
 
 from thistle_client.storage import write_json, normalize_selection
+from thistle_client.ui_helpers import button_icon, menu_item, icon_label, copy_subscription_url
 from thistle_client.config import (
     settings, SUBS_FILE, SINGBOX_CONFIG_FILE, DATA_DIR
 )
@@ -34,6 +35,7 @@ from thistle_client.core_manager import CoreManager
 from thistle_client.clash_api import ClashAPI
 from thistle_client.pinger import MultiModePinger
 from thistle_client.settings_dialog import SettingsDialog
+from thistle_client.subscription_updates import subscription_due
 from thistle_client.subscription_parser import fetch_subscription, parse_subscription_content
 
 ICONS_DIR = os.path.join(os.path.dirname(__file__), "..", "icons")
@@ -52,9 +54,12 @@ class ThistleTrayApp:
 
         self.delays = {}
         self.is_pinging = False
+        self.ping_cancel = threading.Event()
         self.manager_window = None
         self.core_busy = False
         self.pending_connection = None
+        self.refreshing_subscriptions = set()
+        self.refresh_attempts = {}
 
         self.load_data()
 
@@ -76,6 +81,8 @@ class ThistleTrayApp:
 
         # Periodic check for core status
         GLib.timeout_add_seconds(2, self.check_status_tick)
+        GLib.timeout_add_seconds(30, self.auto_refresh_subscriptions)
+        GLib.idle_add(self.auto_refresh_subscriptions, False)
 
         if show_gui:
             self.show_manager_window()
@@ -160,13 +167,13 @@ class ThistleTrayApp:
 
         conflict = self.core.is_conflict_running()
         if conflict and not is_running:
-            conflict_item = Gtk.MenuItem(label=f"⚠️ Запущен {conflict} (конфликт)")
+            conflict_item = menu_item(f"Запущен {conflict} (конфликт)", "dialog-warning-symbolic")
             conflict_item.set_sensitive(False)
             self.menu.append(conflict_item)
 
         # 2. Toggle VPN
         toggle_label = "Отключить VPN" if is_running else "Включить VPN"
-        toggle_item = Gtk.MenuItem(label=toggle_label)
+        toggle_item = menu_item(toggle_label, "network-vpn-symbolic")
         toggle_item.set_sensitive(not self.core_busy)
         toggle_item.connect("activate", self.on_toggle_vpn)
         self.menu.append(toggle_item)
@@ -174,7 +181,7 @@ class ThistleTrayApp:
         self.menu.append(Gtk.SeparatorMenuItem())
 
         # 3. Servers Submenu
-        servers_menu_item = Gtk.MenuItem(label=f"🌐 Серверы ({active_sub})")
+        servers_menu_item = menu_item(f"Серверы ({active_sub})", "network-server-symbolic")
         servers_sub = Gtk.Menu()
 
         if nodes:
@@ -205,16 +212,16 @@ class ThistleTrayApp:
         self.menu.append(servers_menu_item)
 
         # 4. Measure Latency / Ping
-        ping_label = "⏳ Идет замер пинга..." if self.is_pinging else "⚡ Измерить пинг (Proxy-GET)"
-        ping_item = Gtk.MenuItem(label=ping_label)
-        ping_item.set_sensitive(not self.is_pinging and bool(nodes))
-        ping_item.connect("activate", self.on_measure_ping)
+        ping_label = "Остановить пинг" if self.is_pinging else "Измерить пинг (Proxy-GET)"
+        ping_item = menu_item(ping_label, "media-playback-stop-symbolic" if self.is_pinging else "network-transmit-receive-symbolic")
+        ping_item.set_sensitive(self.is_pinging or bool(nodes))
+        ping_item.connect("activate", self.on_stop_ping if self.is_pinging else self.on_measure_ping)
         self.menu.append(ping_item)
 
         self.menu.append(Gtk.SeparatorMenuItem())
 
         # 5. Subscriptions Submenu (CRUD)
-        subs_menu_item = Gtk.MenuItem(label="📁 Подписки")
+        subs_menu_item = menu_item("Подписки", "folder-symbolic")
         subs_sub = Gtk.Menu()
         all_subs = self.data.get("subs", {})
 
@@ -235,17 +242,21 @@ class ThistleTrayApp:
 
             subs_sub.append(Gtk.SeparatorMenuItem())
 
-        add_sub_item = Gtk.MenuItem(label="➕ Добавить подписку...")
+        add_sub_item = menu_item("Добавить подписку...", "list-add-symbolic")
         add_sub_item.set_sensitive(not self.core_busy)
         add_sub_item.connect("activate", self.on_add_subscription_dialog)
         subs_sub.append(add_sub_item)
 
-        update_sub_item = Gtk.MenuItem(label="🔄 Обновить текущую подписку")
+        update_sub_item = menu_item("Обновить текущую подписку", "view-refresh-symbolic")
         update_sub_item.set_sensitive(not self.core_busy and bool(active_sub and all_subs.get(active_sub, {}).get("url")))
         update_sub_item.connect("activate", self.on_refresh_subscription)
         subs_sub.append(update_sub_item)
+        copy_item = menu_item("Скопировать ссылку подписки", "edit-copy-symbolic")
+        copy_item.set_sensitive(bool(all_subs.get(active_sub, {}).get("url")))
+        copy_item.connect("activate", self.on_copy_subscription)
+        subs_sub.append(copy_item)
 
-        del_sub_item = Gtk.MenuItem(label="❌ Удалить текущую подписку")
+        del_sub_item = menu_item("Удалить текущую подписку", "edit-delete-symbolic")
         del_sub_item.set_sensitive(not self.core_busy and bool(active_sub and active_sub in all_subs))
         del_sub_item.connect("activate", self.on_delete_subscription)
         subs_sub.append(del_sub_item)
@@ -254,20 +265,20 @@ class ThistleTrayApp:
         self.menu.append(subs_menu_item)
 
         # 6. Settings
-        settings_item = Gtk.MenuItem(label="⚙️ Настройки...")
+        settings_item = menu_item("Настройки...", "emblem-system-symbolic")
         settings_item.set_sensitive(not self.core_busy)
         settings_item.connect("activate", self.on_open_settings)
         self.menu.append(settings_item)
 
         # 7. Control Window
-        gui_item = Gtk.MenuItem(label="🖥️ Окно управления...")
+        gui_item = menu_item("Окно управления...", "preferences-system-symbolic")
         gui_item.connect("activate", self.on_open_gui)
         self.menu.append(gui_item)
 
         self.menu.append(Gtk.SeparatorMenuItem())
 
         # 8. Quit
-        quit_item = Gtk.MenuItem(label="🚪 Отключить VPN и выйти")
+        quit_item = menu_item("Отключить VPN и выйти", "application-exit-symbolic")
         quit_item.set_sensitive(not self.core_busy)
         quit_item.connect("activate", self.on_quit)
         self.menu.append(quit_item)
@@ -288,6 +299,7 @@ class ThistleTrayApp:
         if self.manager_window is None:
             from thistle_client.manager_gui import ThistleManagerWindow
             self.manager_window = ThistleManagerWindow(tray_app=self)
+        self.manager_window.is_pinging = self.is_pinging
         self.manager_window.refresh_all()
         self.manager_window.show_all()
         self.manager_window.present()
@@ -398,6 +410,9 @@ class ThistleTrayApp:
             return
 
         self.is_pinging = True
+        self.ping_cancel = threading.Event()
+        cancel_event = self.ping_cancel
+        pinger = self.pinger
         self.delays.clear()
         ping_scope = self.data.get("active_sub", "")
         if self.manager_window:
@@ -415,14 +430,14 @@ class ThistleTrayApp:
         def worker():
             results = {}
             try:
-                results = self.pinger.ping_all(
+                results = pinger.ping_all(
                     nodes,
                     method=method,
                     timeout=timeout,
                     test_url=test_url,
                     clash_api=self.clash_api,
                     max_workers=workers,
-                    on_progress=on_node_progress
+                    on_progress=on_node_progress, cancel_event=cancel_event
                 )
             except Exception as e:
                 print(f"[Ping] Error during ping_all: {e}")
@@ -430,6 +445,9 @@ class ThistleTrayApp:
                 GLib.idle_add(self.apply_ping_results, results, ping_scope)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def on_stop_ping(self, widget=None):
+        self.ping_cancel.set()
 
     def on_ping_progress(self, tag: str, delay: int, ping_scope=None):
         if ping_scope is not None and self.data.get("active_sub", "") != ping_scope:
@@ -447,7 +465,7 @@ class ThistleTrayApp:
             self.manager_window.finish_ping(results if same_scope else {}, ping_scope)
         else:
             self.build_menu()
-        self.notify("ThistleClient", "Замер задержки завершен")
+        self.notify("ThistleClient", "Замер остановлен" if self.ping_cancel.is_set() else "Замер задержки завершен")
 
     def on_switch_sub(self, widget, sub_name: str):
         if self.core_busy or not widget.get_active():
@@ -476,6 +494,7 @@ class ThistleTrayApp:
         self.clash_api = ClashAPI(port=clash_port)
         self.pinger = MultiModePinger(mixed_port=mixed_port, clash_port=clash_port)
         self.sync_config(enable_tun=True, restart=True)
+        self.auto_refresh_subscriptions()
         self.update_icon_state()
         self.build_menu()
         if self.manager_window and self.manager_window.is_visible():
@@ -539,32 +558,62 @@ class ThistleTrayApp:
 
         dialog.destroy()
 
+    def on_copy_subscription(self, widget=None):
+        if copy_subscription_url(self.data):
+            self.notify("ThistleClient", "Ссылка подписки скопирована")
+
+    def auto_refresh_subscriptions(self, repeat=True):
+        if settings.get("subscriptions", "auto_update", True):
+            interval = max(1, int(settings.get("subscriptions", "interval_hours", 24)))
+            for name, subscription in list(self.data.get("subs", {}).items()):
+                last_attempt = self.refresh_attempts.get(name)
+                retry_allowed = last_attempt is None or time.monotonic() - last_attempt >= min(900, interval * 3600)
+                if retry_allowed and subscription_due(subscription, time.time(), interval):
+                    self.refresh_subscription(name, automatic=True)
+        return repeat
+
     def on_refresh_subscription(self, widget):
-        sub_name = self.data.get("active_sub")
+        self.refresh_subscription(self.data.get("active_sub"))
+
+    def refresh_subscription(self, sub_name, automatic=False):
         sub_data = self.data.get("subs", {}).get(sub_name)
-        if not sub_data or not sub_data.get("url"):
+        if not sub_data or not sub_data.get("url") or sub_name in self.refreshing_subscriptions:
             return
+        url = sub_data["url"]
+        self.refreshing_subscriptions.add(sub_name)
+        self.refresh_attempts[sub_name] = time.monotonic()
 
         def apply_result(nodes, message):
-            if self.data.get("subs", {}).get(sub_name) is not sub_data:
+            current = self.data.get("subs", {}).get(sub_name)
+            if current is not sub_data or current.get("url") != url:
+                self.refreshing_subscriptions.discard(sub_name)
                 return False
             if not nodes:
-                self.notify("ThistleClient", message)
+                self.refreshing_subscriptions.discard(sub_name)
+                if not automatic:
+                    self.notify("ThistleClient", message)
                 return False
-            if self.core_busy:
+            if self.core_busy or self.is_pinging:
                 GLib.timeout_add(100, apply_result, nodes, message)
                 return False
+            self.refreshing_subscriptions.discard(sub_name)
+            changed = nodes != sub_data.get("nodes", [])
             sub_data["nodes"] = nodes
             sub_data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            active = self.data.get("active_sub") == sub_name
+            if changed and active:
+                self.delays.clear()
             self.save_data()
-            self.sync_config(True, restart=self.data.get("active_sub") == sub_name)
+            if changed and active:
+                self.sync_config(True, restart=True)
             self.build_menu()
-            self.notify("ThistleClient", f"Подписка обновлена: {len(nodes)} серверов")
+            if not automatic:
+                self.notify("ThistleClient", f"Подписка обновлена: {len(nodes)} серверов")
             return False
 
         def worker():
             try:
-                nodes = fetch_subscription(sub_data["url"])
+                nodes = fetch_subscription(url)
                 GLib.idle_add(apply_result, nodes, "Серверы в подписке не найдены.")
             except Exception as exc:
                 GLib.idle_add(apply_result, None, f"Ошибка обновления: {exc}")
@@ -593,6 +642,7 @@ class ThistleTrayApp:
         self.notify("ThistleClient", f"Подписка '{sub_name}' удалена")
 
     def on_quit(self, widget=None):
+        self.ping_cancel.set()
         if self.core_busy:
             return
         if not self.core.stop():

@@ -15,6 +15,7 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import GLib, Gtk, Pango, GdkPixbuf
 
 from thistle_client.storage import write_json, normalize_selection
+from thistle_client.ui_helpers import button_icon, menu_item, icon_label, copy_subscription_url
 from thistle_client.config import (
     settings, SUBS_FILE, SINGBOX_CONFIG_FILE, SINGBOX_LOG_FILE, DATA_DIR
 )
@@ -52,6 +53,7 @@ class ThistleManagerWindow(Gtk.Window):
 
         self.delays = {}
         self.is_pinging = False
+        self.ping_cancel = threading.Event()
         self._ping_scope = None
 
         self.load_data()
@@ -158,10 +160,10 @@ class ThistleManagerWindow(Gtk.Window):
 
         # Action Buttons
         btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        self.btn_settings = Gtk.Button(label="⚙️ Настройки")
+        self.btn_settings = button_icon(Gtk.Button(label="Настройки"), "emblem-system-symbolic")
         self.btn_settings.connect("clicked", self.on_open_settings)
 
-        self.btn_toggle = Gtk.Button(label="Включить VPN")
+        self.btn_toggle = button_icon(Gtk.Button(label="Включить VPN"), "network-vpn-symbolic")
         self.btn_toggle.connect("clicked", self.on_toggle_clicked)
 
         btn_box.pack_start(self.btn_settings, False, False, 0)
@@ -184,19 +186,23 @@ class ThistleManagerWindow(Gtk.Window):
         self.combo_subs = Gtk.ComboBoxText()
         self.combo_subs.connect("changed", self.on_sub_changed)
 
-        btn_add_sub = Gtk.Button(label="➕ Добавить")
+        btn_add_sub = button_icon(Gtk.Button(label="Добавить"), "list-add-symbolic")
         btn_add_sub.connect("clicked", self.on_add_sub_dialog)
 
-        btn_refresh_sub = Gtk.Button(label="🔄 Обновить")
+        btn_refresh_sub = button_icon(Gtk.Button(label="Обновить"), "view-refresh-symbolic")
         btn_refresh_sub.connect("clicked", self.on_refresh_sub_clicked)
 
-        btn_del_sub = Gtk.Button(label="❌ Удалить")
+        btn_del_sub = button_icon(Gtk.Button(label="Удалить"), "edit-delete-symbolic")
         btn_del_sub.connect("clicked", self.on_delete_sub_clicked)
 
         sub_box.pack_start(lbl_sub, False, False, 0)
         sub_box.pack_start(self.combo_subs, True, True, 0)
         sub_box.pack_start(btn_add_sub, False, False, 0)
         sub_box.pack_start(btn_refresh_sub, False, False, 0)
+        self.btn_copy_sub = button_icon(Gtk.Button(), "edit-copy-symbolic")
+        self.btn_copy_sub.set_tooltip_text("Скопировать ссылку подписки")
+        self.btn_copy_sub.connect("clicked", self.on_copy_subscription)
+        sub_box.pack_start(self.btn_copy_sub, False, False, 0)
         sub_box.pack_start(btn_del_sub, False, False, 0)
         vbox.pack_start(sub_box, False, False, 0)
 
@@ -207,11 +213,15 @@ class ThistleManagerWindow(Gtk.Window):
         self.lbl_ping_mode = Gtk.Label(xalign=0)
         self.lbl_ping_mode.set_markup(f"<small><span foreground='#888888'>Метод: Proxy-GET</span></small>")
 
-        self.btn_ping = Gtk.Button(label="⚡ Измерить пинг")
+        self.btn_ping = button_icon(Gtk.Button(label="Измерить пинг"), "network-transmit-receive-symbolic")
         self.btn_ping.connect("clicked", self.on_ping_clicked)
+        self.btn_stop_ping = button_icon(Gtk.Button(label="Остановить"), "media-playback-stop-symbolic")
+        self.btn_stop_ping.set_no_show_all(True)
+        self.btn_stop_ping.connect("clicked", self.on_stop_ping)
 
         srv_header.pack_start(srv_label, False, False, 0)
         srv_header.pack_start(self.lbl_ping_mode, False, False, 4)
+        srv_header.pack_end(self.btn_stop_ping, False, False, 0)
         srv_header.pack_end(self.btn_ping, False, False, 0)
         vbox.pack_start(srv_header, False, False, 0)
 
@@ -251,7 +261,7 @@ class ThistleManagerWindow(Gtk.Window):
 
         # Bottom Bar: Connect Button
         bottom_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        self.btn_select_server = Gtk.Button(label="Подключиться к выбранному серверу")
+        self.btn_select_server = button_icon(Gtk.Button(label="Подключиться к выбранному серверу"), "network-vpn-symbolic")
         self.btn_select_server.connect("clicked", self.on_select_server_clicked)
         bottom_box.pack_start(self.btn_select_server, True, True, 0)
         vbox.pack_start(bottom_box, False, False, 0)
@@ -280,7 +290,7 @@ class ThistleManagerWindow(Gtk.Window):
             conflict = self.core.is_conflict_running()
             if conflict:
                 self.lbl_conflict.set_markup(
-                    f"<span foreground='#FF9100'>⚠️ <b>Внимание:</b> Запущен сторонний VPN (<b>{conflict}</b>). "
+                    f"<span foreground='#FF9100'><b>Внимание:</b> Запущен сторонний VPN (<b>{conflict}</b>). "
                     f"Остановите его перед включением ThistleClient во избежание конфликта маршрутов.</span>"
                 )
                 self.conflict_box.show_all()
@@ -296,6 +306,8 @@ class ThistleManagerWindow(Gtk.Window):
         if busy:
             self.btn_toggle.set_label("Подождите…")
         self.btn_ping.set_sensitive(not busy and not self.is_pinging and has_nodes)
+        self.btn_stop_ping.set_visible(self.is_pinging)
+        self.btn_copy_sub.set_sensitive(bool(self.data.get("subs", {}).get(self.data.get("active_sub"), {}).get("url")))
         timeout_sec = settings.get("ping", "timeout", 4)
         self.lbl_ping_mode.set_markup(f"<small><span foreground='#888888'>Метод: <b>Proxy-GET</b> ({timeout_sec}с)</span></small>")
 
@@ -318,7 +330,7 @@ class ThistleManagerWindow(Gtk.Window):
         if delay is None:
             return "<span foreground='#757575'>—</span>", 99999
         elif delay == "loading":
-            return "<span foreground='#888888'>⏳ замер...</span>", 99997
+            return "<span foreground='#888888'>замер...</span>", 99997
         elif delay == -1:
             return "<span foreground='#FF5252'>Недоступен</span>", 99998
         elif delay < 150:
@@ -493,8 +505,9 @@ class ThistleManagerWindow(Gtk.Window):
             self.delays = self.tray_app.delays
         else:
             self.delays.clear()
-        self.btn_ping.set_label("⏳ Замер...")
+        self.btn_ping.set_label("Замер...")
         self.btn_ping.set_sensitive(False)
+        self.btn_stop_ping.show()
         loading_markup, loading_val = self.format_delay("loading")
         for row in self.model_servers:
             row[3] = loading_markup
@@ -510,6 +523,9 @@ class ThistleManagerWindow(Gtk.Window):
         if not nodes or self.is_pinging:
             return
 
+        self.ping_cancel = threading.Event()
+        cancel_event = self.ping_cancel
+        pinger = self.pinger
         self.begin_ping()
         ping_scope = self._ping_scope
 
@@ -525,14 +541,14 @@ class ThistleManagerWindow(Gtk.Window):
                 def on_progress(tag: str, delay: int):
                     GLib.idle_add(self.update_single_node_ping, tag, delay, ping_scope)
 
-                results = self.pinger.ping_all(
+                results = pinger.ping_all(
                     nodes,
                     method=method,
                     timeout=timeout,
                     test_url=test_url,
                     clash_api=self.clash_api,
                     max_workers=workers,
-                    on_progress=on_progress
+                    on_progress=on_progress, cancel_event=cancel_event
                 )
             except Exception as e:
                 print(f"[Ping] Error during ping_all: {e}")
@@ -541,13 +557,20 @@ class ThistleManagerWindow(Gtk.Window):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def on_stop_ping(self, widget=None):
+        if self.tray_app:
+            self.tray_app.on_stop_ping()
+        else:
+            self.ping_cancel.set()
+
     def finish_ping(self, results: dict, ping_scope=None):
         same_scope = ping_scope is None or self.data.get("active_sub", "") == ping_scope
         if same_scope and results:
             self.delays.update(results)
         self.is_pinging = False
         self._ping_scope = None
-        self.btn_ping.set_label("⚡ Измерить пинг")
+        self.btn_stop_ping.hide()
+        self.btn_ping.set_label("Измерить пинг")
         has_nodes = bool(self.get_current_nodes())
         self.btn_ping.set_sensitive(has_nodes)
 
@@ -555,10 +578,9 @@ class ThistleManagerWindow(Gtk.Window):
         if same_scope:
             for row in self.model_servers:
                 node_tag = row[5]
-                if node_tag in self.delays:
-                    markup, val = self.format_delay(self.delays[node_tag])
-                    row[3] = markup
-                    row[4] = val
+                markup, val = self.format_delay(self.delays.get(node_tag))
+                row[3] = markup
+                row[4] = val
 
         if self.tray_app:
             self.tray_app.is_pinging = False
@@ -640,7 +662,15 @@ class ThistleManagerWindow(Gtk.Window):
 
         dialog.destroy()
 
+    def on_copy_subscription(self, widget=None):
+        if self.tray_app:
+            self.tray_app.on_copy_subscription(widget)
+        else:
+            copy_subscription_url(self.data)
+
     def on_refresh_sub_clicked(self, widget):
+        if self.tray_app:
+            return self.tray_app.on_refresh_subscription(widget)
         sub_name = self.data.get("active_sub")
         sub_data = self.data.get("subs", {}).get(sub_name)
         if not sub_data or not sub_data.get("url"):
